@@ -142,6 +142,16 @@ final class BluetoothPaired extends BluetoothState {
   List<Object?> get props => [deviceId, isPaired, pairedDeviceIds];
 }
 
+// ── SECTION 8: LOGS ───────────────────────────
+final class BluetoothLogsUpdated extends BluetoothState {
+  final String deviceId;
+  final List<BleLogEntry> logs;
+  const BluetoothLogsUpdated(this.deviceId, this.logs);
+
+  @override
+  List<Object?> get props => [deviceId, logs.length];
+}
+
 // ── GLOBAL ERROR ──────────────────────────────
 final class BluetoothError extends BluetoothState {
   final String message;

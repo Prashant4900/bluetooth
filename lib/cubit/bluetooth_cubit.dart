@@ -2,6 +2,8 @@ import 'dart:async';
 
 import 'package:bloc/bloc.dart';
 import 'package:bluetooth/bluetooth_service.dart';
+import 'package:bluetooth/models/ble_log_entry.dart';
+import 'package:bluetooth/storage/log_storage.dart';
 import 'package:bluetooth/storage/pairing_storage.dart';
 import 'package:equatable/equatable.dart';
 import 'package:flutter/foundation.dart';
@@ -19,6 +21,13 @@ class BluetoothCubit extends Cubit<BluetoothState> {
 
   /// Convenience getter for the UI.
   Set<String> get pairedDeviceIds => Set.unmodifiable(_pairedDeviceIds);
+
+  // In-memory log buffer per device
+  final Map<String, List<BleLogEntry>> _deviceLogs = {};
+
+  /// Return in-memory logs for [deviceId] (empty list if none yet).
+  List<BleLogEntry> logsFor(String deviceId) =>
+      List.unmodifiable(_deviceLogs[deviceId] ?? []);
 
   // ══════════════════════════════════════════════
   // SECTION 1 – INITIALIZE
@@ -65,6 +74,41 @@ class BluetoothCubit extends Cubit<BluetoothState> {
   }
 
   // ══════════════════════════════════════════════
+  // SECTION 8 – LOGGING
+  // ══════════════════════════════════════════════
+
+  /// Core log helper: writes to memory, persists, and emits state.
+  Future<void> _log(BleLogEntry entry) async {
+    final list = _deviceLogs.putIfAbsent(entry.deviceId, () => []);
+    list.add(entry);
+    emit(BluetoothLogsUpdated(entry.deviceId, List.unmodifiable(list)));
+    // Persist asynchronously (fire-and-forget; UI already updated)
+    LogStorage.appendLog(entry).ignore();
+  }
+
+  /// Load historical logs for [deviceId] from SharedPreferences into memory
+  /// and emit [BluetoothLogsUpdated].
+  Future<void> loadDeviceLogs(String deviceId) async {
+    final stored = await LogStorage.loadLogs(deviceId);
+    // Merge: stored first, then any in-memory newer entries
+    final inMem = _deviceLogs[deviceId] ?? [];
+    final merged = <BleLogEntry>[...stored];
+    for (final e in inMem) {
+      if (!merged.any((s) => s.id == e.id)) merged.add(e);
+    }
+    merged.sort((a, b) => a.timestamp.compareTo(b.timestamp));
+    _deviceLogs[deviceId] = merged;
+    emit(BluetoothLogsUpdated(deviceId, List.unmodifiable(merged)));
+  }
+
+  /// Clear in-memory and persisted logs for [deviceId].
+  Future<void> clearDeviceLogs(String deviceId) async {
+    _deviceLogs.remove(deviceId);
+    await LogStorage.clearLogs(deviceId);
+    emit(BluetoothLogsUpdated(deviceId, const []));
+  }
+
+  // ══════════════════════════════════════════════
   // SECTION 2 – SCANNING
   // ══════════════════════════════════════════════
 
@@ -85,6 +129,17 @@ class BluetoothCubit extends Cubit<BluetoothState> {
         if (!exists) {
           _discoveredDevices.add(device);
           emit(BluetoothScanResult(List.unmodifiable(_discoveredDevices)));
+          // Log each new device discovery
+          _log(
+            BleLogEntry.system(
+              deviceId: device.deviceId,
+              deviceName: device.name,
+              type: LogType.scan,
+              message:
+                  'Discovered: "${device.name ?? "Unknown"}"'
+                  '${device.rssi != null ? " — RSSI ${device.rssi} dBm" : ""}',
+            ),
+          );
         }
       });
 
@@ -115,6 +170,14 @@ class BluetoothCubit extends Cubit<BluetoothState> {
   /// Connect to [device] and start monitoring its connection state.
   Future<void> connect(BleDevice device) async {
     emit(BluetoothConnecting(device));
+    await _log(
+      BleLogEntry.system(
+        deviceId: device.deviceId,
+        deviceName: device.name,
+        type: LogType.connect,
+        message: 'Connecting to "${device.name ?? device.deviceId}"…',
+      ),
+    );
     try {
       await _ble.connect(device);
       _connectedDevice = device;
@@ -123,14 +186,38 @@ class BluetoothCubit extends Cubit<BluetoothState> {
       _connectionSub = _ble.connectionStream(device).listen((isConnected) {
         if (isConnected) {
           emit(BluetoothConnected(device));
+          _log(
+            BleLogEntry.system(
+              deviceId: device.deviceId,
+              deviceName: device.name,
+              type: LogType.connect,
+              message: 'Connected to "${device.name ?? device.deviceId}"',
+            ),
+          );
         } else {
           emit(BluetoothDisconnected(device));
           _connectedDevice = null;
+          _log(
+            BleLogEntry.system(
+              deviceId: device.deviceId,
+              deviceName: device.name,
+              type: LogType.disconnect,
+              message: 'Disconnected from "${device.name ?? device.deviceId}"',
+            ),
+          );
         }
       });
 
       emit(BluetoothConnected(device));
     } catch (e) {
+      await _log(
+        BleLogEntry.system(
+          deviceId: device.deviceId,
+          deviceName: device.name,
+          type: LogType.error,
+          message: 'Connection failed: $e',
+        ),
+      );
       emit(BluetoothError(e.toString()));
     }
   }
@@ -144,6 +231,14 @@ class BluetoothCubit extends Cubit<BluetoothState> {
       _connectionSub?.cancel();
       emit(BluetoothDisconnected(device));
       _connectedDevice = null;
+      await _log(
+        BleLogEntry.system(
+          deviceId: device.deviceId,
+          deviceName: device.name,
+          type: LogType.disconnect,
+          message: 'Disconnected (user initiated)',
+        ),
+      );
     } catch (e) {
       emit(BluetoothError(e.toString()));
     }
@@ -159,6 +254,16 @@ class BluetoothCubit extends Cubit<BluetoothState> {
   Future<void> discoverServices(BleDevice device) async {
     try {
       _services = await _ble.discoverServices(device);
+      await _log(
+        BleLogEntry.system(
+          deviceId: device.deviceId,
+          deviceName: device.name,
+          type: LogType.serviceDiscovery,
+          message:
+              'Discovered ${_services.length} service(s): '
+              '${_services.map((s) => s.uuid).join(", ")}',
+        ),
+      );
       emit(BluetoothServicesDiscovered(device, _services));
     } catch (e) {
       emit(BluetoothError(e.toString()));
@@ -170,9 +275,25 @@ class BluetoothCubit extends Cubit<BluetoothState> {
   // ══════════════════════════════════════════════
 
   /// Read from [characteristic] and emit [BluetoothDataRead].
-  Future<void> read(BleCharacteristic characteristic) async {
+  Future<void> read(
+    BleCharacteristic characteristic, {
+    String? deviceId,
+    String? deviceName,
+  }) async {
     try {
       final data = await _ble.read(characteristic);
+      if (deviceId != null) {
+        await _log(
+          BleLogEntry.data(
+            deviceId: deviceId,
+            deviceName: deviceName,
+            direction: LogDirection.incoming,
+            type: LogType.read,
+            message: 'Read from ${characteristic.uuid}',
+            bytes: data,
+          ),
+        );
+      }
       emit(BluetoothDataRead(data));
     } catch (e) {
       emit(BluetoothError(e.toString()));
@@ -184,9 +305,25 @@ class BluetoothCubit extends Cubit<BluetoothState> {
     BleCharacteristic characteristic,
     List<int> data, {
     bool withResponse = true,
+    String? deviceId,
+    String? deviceName,
   }) async {
     try {
       await _ble.write(characteristic, data, withResponse: withResponse);
+      if (deviceId != null) {
+        await _log(
+          BleLogEntry.data(
+            deviceId: deviceId,
+            deviceName: deviceName,
+            direction: LogDirection.outgoing,
+            type: LogType.write,
+            message:
+                'Write${withResponse ? " (with response)" : " (no response)"} '
+                'to ${characteristic.uuid}',
+            bytes: Uint8List.fromList(data),
+          ),
+        );
+      }
       emit(BluetoothDataWritten());
     } catch (e) {
       emit(BluetoothError(e.toString()));
@@ -203,18 +340,43 @@ class BluetoothCubit extends Cubit<BluetoothState> {
   Future<void> subscribe(
     BleCharacteristic characteristic, {
     bool useIndications = false,
+    String? deviceId,
+    String? deviceName,
   }) async {
     try {
       _notifySub?.cancel();
+      void handler(Uint8List data) {
+        if (deviceId != null) {
+          _log(
+            BleLogEntry.data(
+              deviceId: deviceId,
+              deviceName: deviceName,
+              direction: LogDirection.incoming,
+              type: useIndications ? LogType.indicate : LogType.notify,
+              message:
+                  '${useIndications ? "Indication" : "Notification"} from ${characteristic.uuid}',
+              bytes: data,
+            ),
+          );
+        }
+        emit(BluetoothDataReceived(data));
+      }
+
       if (useIndications) {
-        _notifySub = await _ble.subscribeIndications(
-          characteristic,
-          (data) => emit(BluetoothDataReceived(data)),
-        );
+        _notifySub = await _ble.subscribeIndications(characteristic, handler);
       } else {
-        _notifySub = await _ble.subscribeNotifications(
-          characteristic,
-          (data) => emit(BluetoothDataReceived(data)),
+        _notifySub = await _ble.subscribeNotifications(characteristic, handler);
+      }
+      if (deviceId != null) {
+        await _log(
+          BleLogEntry.system(
+            deviceId: deviceId,
+            deviceName: deviceName,
+            type: LogType.info,
+            message:
+                'Subscribed to ${useIndications ? "indications" : "notifications"} '
+                'on ${characteristic.uuid}',
+          ),
         );
       }
       emit(BluetoothSubscribed());
@@ -238,20 +400,31 @@ class BluetoothCubit extends Cubit<BluetoothState> {
   // ══════════════════════════════════════════════
 
   /// Pair with [device].
-  /// Saves the device ID to SharedPreferences on success.
   Future<void> pairDevice(
     BleDevice device, {
     BleCommand? pairingCommand,
   }) async {
     emit(BluetoothPairingInProgress(device.deviceId));
+    await _log(
+      BleLogEntry.system(
+        deviceId: device.deviceId,
+        deviceName: device.name,
+        type: LogType.pair,
+        message: 'Pairing requested with "${device.name ?? device.deviceId}"…',
+      ),
+    );
     try {
       await _ble.pair(device, pairingCommand: pairingCommand);
-
-      // Persist pairing
       await PairingStorage.savePaired(device.deviceId);
       _pairedDeviceIds = await PairingStorage.loadPairedIds();
-
-      debugPrint('[BLE] Paired & saved: ${device.deviceId}');
+      await _log(
+        BleLogEntry.system(
+          deviceId: device.deviceId,
+          deviceName: device.name,
+          type: LogType.pair,
+          message: 'Paired successfully & saved to storage',
+        ),
+      );
       emit(
         BluetoothPaired(
           deviceId: device.deviceId,
@@ -260,22 +433,41 @@ class BluetoothCubit extends Cubit<BluetoothState> {
         ),
       );
     } catch (e) {
+      await _log(
+        BleLogEntry.system(
+          deviceId: device.deviceId,
+          deviceName: device.name,
+          type: LogType.error,
+          message: 'Pair failed: $e',
+        ),
+      );
       emit(BluetoothError(e.toString()));
     }
   }
 
   /// Unpair [device].
-  /// Removes the device ID from SharedPreferences.
   Future<void> unpairDevice(BleDevice device) async {
     emit(BluetoothPairingInProgress(device.deviceId));
+    await _log(
+      BleLogEntry.system(
+        deviceId: device.deviceId,
+        deviceName: device.name,
+        type: LogType.unpair,
+        message: 'Unpair requested for "${device.name ?? device.deviceId}"…',
+      ),
+    );
     try {
       await _ble.unpair(device);
-
-      // Remove from persistence
       await PairingStorage.removePaired(device.deviceId);
       _pairedDeviceIds = await PairingStorage.loadPairedIds();
-
-      debugPrint('[BLE] Unpaired & removed: ${device.deviceId}');
+      await _log(
+        BleLogEntry.system(
+          deviceId: device.deviceId,
+          deviceName: device.name,
+          type: LogType.unpair,
+          message: 'Unpaired & removed from storage',
+        ),
+      );
       emit(
         BluetoothPaired(
           deviceId: device.deviceId,
@@ -284,6 +476,14 @@ class BluetoothCubit extends Cubit<BluetoothState> {
         ),
       );
     } catch (e) {
+      await _log(
+        BleLogEntry.system(
+          deviceId: device.deviceId,
+          deviceName: device.name,
+          type: LogType.error,
+          message: 'Unpair failed: $e',
+        ),
+      );
       emit(BluetoothError(e.toString()));
     }
   }
