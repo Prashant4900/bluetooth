@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:bloc/bloc.dart';
 import 'package:bluetooth/bluetooth_service.dart';
 import 'package:bluetooth/models/ble_log_entry.dart';
+import 'package:bluetooth/services/background_service_bridge.dart';
 import 'package:bluetooth/storage/log_storage.dart';
 import 'package:bluetooth/storage/pairing_storage.dart';
 import 'package:equatable/equatable.dart';
@@ -140,6 +141,18 @@ class BluetoothCubit extends Cubit<BluetoothState> {
                   '${device.rssi != null ? " — RSSI ${device.rssi} dBm" : ""}',
             ),
           );
+
+          // ── In-app auto-reconnect ──────────────────────────────────
+          // If this device is in our paired list and we are not already
+          // connecting/connected to it, auto-connect immediately.
+          if (_pairedDeviceIds.contains(device.deviceId) &&
+              state is! BluetoothConnecting &&
+              state is! BluetoothConnected) {
+            debugPrint(
+              '[BLE] Auto-connecting to paired device: ${device.deviceId}',
+            );
+            connect(device);
+          }
         }
       });
 
@@ -425,6 +438,8 @@ class BluetoothCubit extends Cubit<BluetoothState> {
           message: 'Paired successfully & saved to storage',
         ),
       );
+      // Start the background service so it watches for this device
+      await BackgroundServiceBridge.start();
       emit(
         BluetoothPaired(
           deviceId: device.deviceId,
@@ -468,6 +483,10 @@ class BluetoothCubit extends Cubit<BluetoothState> {
           message: 'Unpaired & removed from storage',
         ),
       );
+      // Stop background service if no paired devices remain
+      if (_pairedDeviceIds.isEmpty) {
+        await BackgroundServiceBridge.stop();
+      }
       emit(
         BluetoothPaired(
           deviceId: device.deviceId,

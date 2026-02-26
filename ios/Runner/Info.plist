@@ -26,6 +26,22 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+
+	<!-- ── Bluetooth background mode ─────────────────────────────── -->
+	<!-- Allows CoreBluetooth to continue scanning/connecting while  -->
+	<!-- the app is backgrounded. The OS will wake the app when a   -->
+	<!-- previously connected peripheral comes back in range.       -->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>bluetooth-central</string>
+	</array>
+
+	<!-- ── Bluetooth usage descriptions ──────────────────────────── -->
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>This app uses Bluetooth to discover and auto-reconnect to your paired devices, even when running in the background.</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>This app uses Bluetooth to communicate with BLE peripherals.</string>
+
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
@@ -66,13 +82,5 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
-		<key>CADisableMinimumFrameDurationOnPhone</key>
-	<true/>
-	<key>UIApplicationSupportsIndirectInputEvents</key>
-	<true/>
-	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>Discover Bluetooth devices</string>
-	<key>NSBluetoothPeripheralUsageDescription</key>
-	<string>Discover Bluetooth devices</string>
 </dict>
 </plist>
