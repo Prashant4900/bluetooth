@@ -73,24 +73,13 @@ class ScannerScreen extends StatelessWidget {
 
       // ── Device list ──────────────────────────────────────────
       body: BlocBuilder<BluetoothCubit, BluetoothState>(
-        buildWhen: (_, curr) =>
-            curr is BluetoothLoading ||
-            curr is BluetoothScanning ||
-            curr is BluetoothScanResult ||
-            curr is BluetoothScanStopped ||
-            curr is BluetoothInitialized ||
-            curr is BluetoothError,
         builder: (context, state) {
           final isLmnpOnly = cubit.showOnlyLmnp;
-          final List<BleDevice> devices = switch (state) {
-            BluetoothScanResult(:final devices) =>
-              isLmnpOnly
-                  ? devices
-                        .where((d) => d.name?.startsWith('LMNP') == true)
-                        .toList()
-                  : devices,
-            _ => const [],
-          };
+          final List<BleDevice> devices = isLmnpOnly
+              ? cubit.discoveredDevices
+                    .where((d) => d.name?.startsWith('LMNP') == true)
+                    .toList()
+              : cubit.discoveredDevices;
 
           if (state is BluetoothLoading) {
             return const Center(child: CircularProgressIndicator());
@@ -129,15 +118,23 @@ class ScannerScreen extends StatelessWidget {
                   : 'Unknown Device';
               final rssi = device.rssi;
               final isPaired = cubit.pairedDeviceIds.contains(device.deviceId);
+              final isConnected =
+                  cubit.connectedDevice?.deviceId == device.deviceId;
 
               return ListTile(
                 leading: CircleAvatar(
-                  backgroundColor: isPaired
+                  backgroundColor: isConnected
+                      ? Colors.blue.shade50
+                      : isPaired
                       ? Colors.green.shade50
                       : Colors.deepPurple.shade50,
                   child: Icon(
                     Icons.bluetooth,
-                    color: isPaired ? Colors.green : Colors.deepPurple,
+                    color: isConnected
+                        ? Colors.blue
+                        : isPaired
+                        ? Colors.green
+                        : Colors.deepPurple,
                   ),
                 ),
                 title: Row(
@@ -148,7 +145,7 @@ class ScannerScreen extends StatelessWidget {
                         style: const TextStyle(fontWeight: FontWeight.w600),
                       ),
                     ),
-                    if (isPaired)
+                    if (isPaired && !isConnected)
                       Container(
                         padding: const EdgeInsets.symmetric(
                           horizontal: 6,
@@ -164,6 +161,26 @@ class ScannerScreen extends StatelessWidget {
                           style: TextStyle(
                             fontSize: 11,
                             color: Colors.green.shade700,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    if (isConnected)
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 6,
+                          vertical: 2,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.blue.shade50,
+                          border: Border.all(color: Colors.blue.shade300),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Text(
+                          'Connected ✓',
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: Colors.blue.shade700,
                             fontWeight: FontWeight.w600,
                           ),
                         ),

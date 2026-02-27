@@ -247,6 +247,8 @@ class BluetoothCubit extends Cubit<BluetoothState> {
 
   StreamSubscription<BleDevice>? _scanSub;
   final List<BleDevice> _discoveredDevices = [];
+  List<BleDevice> get discoveredDevices =>
+      List.unmodifiable(_discoveredDevices);
 
   /// Start scanning. Already-seen devices are de-duplicated by ID.
   Future<void> startScan({List<String> withServices = const []}) async {
@@ -310,6 +312,7 @@ class BluetoothCubit extends Cubit<BluetoothState> {
   // ══════════════════════════════════════════════
 
   BleDevice? _connectedDevice;
+  BleDevice? get connectedDevice => _connectedDevice;
   StreamSubscription<bool>? _connectionSub;
 
   /// Connect to [device] and start monitoring its connection state.
