@@ -111,6 +111,13 @@ class LogStorage {
     }
   }
 
+  /// Get a list of all device IDs that currently have stored logs.
+  static Future<List<String>> getDevicesWithLogs() async {
+    final prefs = await SharedPreferences.getInstance();
+    final keys = prefs.getKeys().where((k) => k.startsWith(_prefix)).toList();
+    return keys.map((k) => k.replaceFirst(_prefix, '')).toList();
+  }
+
   // ── Stats ─────────────────────────────────────
 
   /// Returns the number of stored entries for [deviceId] without loading them.

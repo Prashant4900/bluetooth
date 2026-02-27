@@ -1,7 +1,8 @@
 import 'package:bluetooth/cubit/bluetooth_cubit.dart';
-import 'package:bluetooth/screens/scanner_screen.dart';
+import 'package:bluetooth/screens/main_navigation_screen.dart';
 import 'package:bluetooth/services/app_permissions.dart';
 import 'package:bluetooth/services/ble_background_service.dart';
+import 'package:bluetooth/services/notification_service.dart';
 import 'package:bluetooth/storage/pairing_storage.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
@@ -10,13 +11,16 @@ import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // 1. Configure flutter_foreground_task (must run before anything BLE)
+  // 1. Initialize our custom local notification service
+  await NotificationService.initialize();
+
+  // 2. Configure flutter_foreground_task (must run before anything BLE)
   BleBackgroundService.initialize();
 
-  // 2. Request BLE + notification permissions
+  // 3. Request BLE + notification permissions
   await AppPermissions.requestAll();
 
-  // 3. If paired devices already exist (e.g. after reboot), start the
+  // 4. If paired devices already exist (e.g. after reboot), start the
   //    background service in case the boot receiver hasn't fired yet.
   final paired = await PairingStorage.loadPairedIds();
   if (paired.isNotEmpty) {
@@ -41,7 +45,7 @@ class MyApp extends StatelessWidget {
           theme: ThemeData(
             colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
           ),
-          home: const ScannerScreen(),
+          home: const MainNavigationScreen(),
         ),
       ),
     );

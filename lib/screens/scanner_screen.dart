@@ -17,6 +17,22 @@ class ScannerScreen extends StatelessWidget {
     return Scaffold(
       appBar: AppBar(
         title: const Text('BLE Scanner'),
+        actions: [
+          BlocBuilder<BluetoothCubit, BluetoothState>(
+            builder: (context, state) {
+              final isLmnpOnly = context.read<BluetoothCubit>().showOnlyLmnp;
+              return IconButton(
+                tooltip: isLmnpOnly ? 'Show All Devices' : 'Show LMNP Only',
+                onPressed: () =>
+                    context.read<BluetoothCubit>().toggleLmnpFilter(),
+                icon: Icon(
+                  isLmnpOnly ? Icons.filter_alt : Icons.filter_alt_off,
+                  color: isLmnpOnly ? Colors.greenAccent : Colors.grey,
+                ),
+              );
+            },
+          ),
+        ],
         bottom: PreferredSize(
           preferredSize: const Size.fromHeight(28),
           child: BlocBuilder<BluetoothCubit, BluetoothState>(
@@ -65,8 +81,14 @@ class ScannerScreen extends StatelessWidget {
             curr is BluetoothInitialized ||
             curr is BluetoothError,
         builder: (context, state) {
+          final isLmnpOnly = cubit.showOnlyLmnp;
           final List<BleDevice> devices = switch (state) {
-            BluetoothScanResult(:final devices) => devices,
+            BluetoothScanResult(:final devices) =>
+              isLmnpOnly
+                  ? devices
+                        .where((d) => d.name?.startsWith('LMNP') == true)
+                        .toList()
+                  : devices,
             _ => const [],
           };
 

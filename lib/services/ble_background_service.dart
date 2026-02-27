@@ -1,4 +1,5 @@
 import 'package:bluetooth/models/ble_log_entry.dart';
+import 'package:bluetooth/services/notification_service.dart';
 import 'package:bluetooth/storage/log_storage.dart';
 import 'package:bluetooth/storage/pairing_storage.dart';
 import 'package:flutter/foundation.dart';
@@ -135,10 +136,17 @@ class _BleTaskHandler extends TaskHandler {
             '[BG] Auto-connected successfully (background)',
           );
 
-          // Update notification
+          // Update background persistent notification
           FlutterForegroundTask.updateService(
             notificationTitle: 'BLE Monitor',
             notificationText: 'Connected: ${device.name ?? device.deviceId}',
+          );
+
+          // Trigger system popup notification
+          await NotificationService.showNotification(
+            id: device.deviceId.hashCode ^ 1,
+            title: 'Device Reconnected',
+            body: 'Connected to ${device.name ?? device.deviceId}',
           );
         } catch (e) {
           _connecting.remove(device.deviceId);
@@ -166,6 +174,15 @@ class _BleTaskHandler extends TaskHandler {
             notificationTitle: 'BLE Monitor',
             notificationText: 'Watching for your paired devices…',
           );
+
+          await NotificationService.showNotification(
+            id: deviceId.hashCode ^ 2,
+            title: 'Device Disconnected',
+            body: 'Lost connection to device.',
+          );
+          // Ensure scanning resumes after a disconnect so it can catch
+          // the device when it comes back into range.
+          await _startScan();
         }
       };
     } catch (e) {
