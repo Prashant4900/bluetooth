@@ -3,12 +3,34 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:universal_ble/universal_ble.dart';
 
+/// A single connection-state change event from any BLE device.
+class BleConnectionEvent {
+  const BleConnectionEvent({
+    required this.deviceId,
+    required this.isConnected,
+    this.error,
+  });
+  final String deviceId;
+  final bool isConnected;
+  final String? error;
+}
+
 // ─────────────────────────────────────────────────
 // BluetoothService
 // A thin wrapper over universal_ble that exposes
 // each feature group as a clearly separated section.
 // ─────────────────────────────────────────────────
 class BluetoothService {
+  // Global stream of connection state changes for ALL BLE devices.
+  // Fed directly by UniversalBle.onConnectionChange so it fires
+  // for system-paired devices (earbuds, headsets) too, not just
+  // devices explicitly connected through BluetoothService.
+  final _connectionEventController =
+      StreamController<BleConnectionEvent>.broadcast();
+
+  Stream<BleConnectionEvent> get connectionStateStream =>
+      _connectionEventController.stream;
+
   // ══════════════════════════════════════════════
   // SECTION 1 – INITIALIZE
   // ══════════════════════════════════════════════
@@ -42,10 +64,28 @@ class BluetoothService {
     // 10-second command timeout (default, kept explicit).
     UniversalBle.timeout = const Duration(seconds: 10);
 
-    // Wire the global availability handler (optional – callers
-    // can also listen to [availabilityStream] directly).
+    // Wire the global availability handler.
     UniversalBle.onAvailabilityChange = (AvailabilityState state) {
       debugPrint('[BLE] Availability changed → $state');
+    };
+
+    // ── Global connection change handler ────────────────────────
+    // This fires for EVERY device: explicitly-connected GATT devices
+    // AND system-paired devices (earbuds, headsets) that connect or
+    // disconnect independently of the app.
+    UniversalBle.onConnectionChange = (deviceId, isConnected, error) {
+      debugPrint(
+        '[BLE] Connection change: $deviceId → '
+        '${isConnected ? "connected" : "disconnected"}'
+        '${error != null ? " ($error)" : ""}',
+      );
+      _connectionEventController.add(
+        BleConnectionEvent(
+          deviceId: deviceId,
+          isConnected: isConnected,
+          error: error,
+        ),
+      );
     };
 
     // Return current state so cubit can show the right UI.

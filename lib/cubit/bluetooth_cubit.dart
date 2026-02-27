@@ -35,6 +35,7 @@ class BluetoothCubit extends Cubit<BluetoothState> {
   // ══════════════════════════════════════════════
 
   StreamSubscription<AvailabilityState>? _availabilitySub;
+  StreamSubscription<BleConnectionEvent>? _globalConnectionSub;
 
   /// Initialise BLE stack and start listening for availability changes.
   Future<void> initialize() async {
@@ -54,14 +55,89 @@ class BluetoothCubit extends Cubit<BluetoothState> {
       // Load stored paired device IDs before emitting initialized.
       await _loadPairedDevices();
 
+      // ── Global connection state listener ─────────────────────────
+      // Fires for ANY device: GATT devices we connect to explicitly
+      // AND system-paired devices (earbuds, headsets) that connect or
+      // disconnect on their own (e.g. opening/closing the case, picking
+      // up/ending a call).
+      _globalConnectionSub?.cancel();
+      _globalConnectionSub = _ble.connectionStateStream.listen((event) {
+        final knownName = _discoveredDevices
+            .cast<BleDevice?>()
+            .firstWhere(
+              (d) => d?.deviceId == event.deviceId,
+              orElse: () => null,
+            )
+            ?.name;
+
+        if (event.isConnected) {
+          _log(
+            BleLogEntry.system(
+              deviceId: event.deviceId,
+              deviceName: knownName,
+              type: LogType.connect,
+              message:
+                  'Connected'
+                  '${event.error != null ? " (${event.error})" : ""}',
+            ),
+          );
+        } else {
+          _log(
+            BleLogEntry.system(
+              deviceId: event.deviceId,
+              deviceName: knownName,
+              type: LogType.disconnect,
+              message: event.error != null
+                  ? 'Disconnected — ${event.error}'
+                  : 'Disconnected',
+            ),
+          );
+          // Clear connected device if it matches
+          if (_connectedDevice?.deviceId == event.deviceId) {
+            _connectedDevice = null;
+          }
+        }
+      });
+
       emit(BluetoothInitialized(availState));
 
       // Auto-start scanning if BLE is already on
       if (availState == AvailabilityState.poweredOn) {
         await startScan();
+        // Also query devices already connected at the OS level
+        // (earbuds paired via system settings don't appear in scan).
+        await _checkSystemDevices();
       }
     } catch (e) {
       emit(BluetoothError(e.toString()));
+    }
+  }
+
+  /// Query system-connected devices (paired via OS, not this app's scan).
+  /// Logs any that are in our paired list so the user sees the connection.
+  Future<void> _checkSystemDevices() async {
+    try {
+      final systemDevices = await _ble.getSystemDevices();
+      for (final device in systemDevices) {
+        // Add to discovered list so connection events can resolve the name
+        if (!_discoveredDevices.any((d) => d.deviceId == device.deviceId)) {
+          _discoveredDevices.add(device);
+        }
+        // Log the fact they are already connected
+        await _log(
+          BleLogEntry.system(
+            deviceId: device.deviceId,
+            deviceName: device.name,
+            type: LogType.connect,
+            message: 'Already connected (system/OS paired device)',
+          ),
+        );
+      }
+      if (systemDevices.isNotEmpty) {
+        emit(BluetoothScanResult(List.unmodifiable(_discoveredDevices)));
+      }
+    } catch (_) {
+      // Best-effort — ignore if unsupported
     }
   }
 
@@ -514,6 +590,7 @@ class BluetoothCubit extends Cubit<BluetoothState> {
   @override
   Future<void> close() async {
     await _availabilitySub?.cancel();
+    await _globalConnectionSub?.cancel();
     await _scanSub?.cancel();
     await _connectionSub?.cancel();
     await _notifySub?.cancel();
