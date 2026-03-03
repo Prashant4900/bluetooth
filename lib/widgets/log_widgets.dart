@@ -181,7 +181,6 @@ class _LogTileState extends State<LogTile> {
                             ? Colors.red.shade300
                             : Colors.white70,
                       ),
-                      overflow: TextOverflow.ellipsis,
                     ),
                   ),
                   if (hasData)

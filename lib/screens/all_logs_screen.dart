@@ -48,12 +48,10 @@ class _AllLogsScreenState extends State<AllLogsScreen> {
   List<BleLogEntry> _applyFilter(List<BleLogEntry> logs) {
     var filtered = logs;
 
-    // 1. Only show logs for devices starting with LMNP if filter is active
-    if (_cubit.showOnlyLmnp) {
-      filtered = filtered
-          .where((e) => e.deviceName?.startsWith('LMNP') == true)
-          .toList();
-    }
+    // 1. Only show logs for devices starting with LMNP
+    filtered = filtered
+        .where((e) => e.deviceName?.startsWith('LMNP') == true)
+        .toList();
 
     // 2. Filter by specific device if selected
     if (_selectedDeviceId != null) {
@@ -86,45 +84,34 @@ class _AllLogsScreenState extends State<AllLogsScreen> {
         title: const Text(
           'All Global Logs',
           style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-        ),
-        actions: [
-          BlocBuilder<BluetoothCubit, BluetoothState>(
-            builder: (context, state) {
-              final isLmnpOnly = _cubit.showOnlyLmnp;
-              return IconButton(
-                tooltip: isLmnpOnly ? 'Show All Devices' : 'Show LMNP Only',
-                onPressed: () => _cubit.toggleLmnpFilter(),
-                icon: Icon(
-                  isLmnpOnly ? Icons.filter_alt : Icons.filter_alt_off,
-                  color: isLmnpOnly ? Colors.greenAccent : Colors.grey,
-                ),
-              );
-            },
-          ),
-          IconButton(
-            tooltip: _autoScroll ? 'Auto-scroll ON' : 'Auto-scroll OFF',
-            onPressed: () => setState(() => _autoScroll = !_autoScroll),
-            icon: Icon(
-              _autoScroll ? Icons.vertical_align_bottom : Icons.pause,
-              color: _autoScroll ? Colors.greenAccent : Colors.grey,
-            ),
-          ),
-          IconButton(
-            tooltip: 'Clear view',
-            onPressed: () => setState(() {
-              // Doing this clear might be confusing globally; a better option
-              // might be just visual clearing or redirect to Device Log to clear.
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text(
-                    'Global log clear not supported, clear individually via Device info.',
-                  ),
-                ),
-              );
-            }),
-            icon: const Icon(Icons.delete_outline, color: Colors.grey),
-          ),
-        ],
+        )
+        // ,
+        // actions: [
+        //   // Filter toggle removed logic
+        //   IconButton(
+        //     tooltip: _autoScroll ? 'Auto-scroll ON' : 'Auto-scroll OFF',
+        //     onPressed: () => setState(() => _autoScroll = !_autoScroll),
+        //     icon: Icon(
+        //       _autoScroll ? Icons.vertical_align_bottom : Icons.pause,
+        //       color: _autoScroll ? Colors.greenAccent : Colors.grey,
+        //     ),
+        //   ),
+        //   IconButton(
+        //     tooltip: 'Clear view',
+        //     onPressed: () => setState(() {
+        //       // Doing this clear might be confusing globally; a better option
+        //       // might be just visual clearing or redirect to Device Log to clear.
+        //       ScaffoldMessenger.of(context).showSnackBar(
+        //         const SnackBar(
+        //           content: Text(
+        //             'Global log clear not supported, clear individually via Device info.',
+        //           ),
+        //         ),
+        //       );
+        //     }),
+        //     icon: const Icon(Icons.delete_outline, color: Colors.grey),
+        //   ),
+        // ],
       ),
 
       body: Column(
@@ -145,12 +132,10 @@ class _AllLogsScreenState extends State<AllLogsScreen> {
                     buildWhen: (_, curr) => curr is BluetoothLogsUpdated,
                     builder: (context, _) {
                       final logs = _cubit.allLogs;
-                      final isLmnpOnly = _cubit.showOnlyLmnp;
                       // Extract unique device IDs & names
                       final deviceMap = <String, String>{};
                       for (final log in logs) {
-                        if (!isLmnpOnly ||
-                            log.deviceName?.startsWith('LMNP') == true) {
+                        if (log.deviceName?.startsWith('LMNP') == true) {
                           deviceMap[log.deviceId] =
                               log.deviceName ??
                               'Unknown (${log.deviceId.substring(0, 5)}...)';

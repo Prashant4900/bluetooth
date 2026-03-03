@@ -27,26 +27,6 @@ class BluetoothCubit extends Cubit<BluetoothState> {
   // In-memory log buffer per device
   final Map<String, List<BleLogEntry>> _deviceLogs = {};
 
-  // UI state for filtering
-  bool _showOnlyLmnp = false;
-  bool get showOnlyLmnp => _showOnlyLmnp;
-
-  void toggleLmnpFilter() {
-    _showOnlyLmnp = !_showOnlyLmnp;
-    // Re-emit state to trigger UI rebuild
-    if (state is BluetoothScanResult) {
-      // Refresh scan list
-      emit(BluetoothScanResult(List.unmodifiable(_discoveredDevices)));
-    } else {
-      // Just emit current state to force rebuild if not scanning
-      emit(
-        BluetoothLoading(),
-      ); // tiny placeholder to force toggle, then back to real
-      emit(state);
-    }
-    // Also broadcast logs updated so the global log screen refreshes
-    emit(BluetoothLogsUpdated('all', allLogs));
-  }
 
   /// Return in-memory logs for [deviceId] (empty list if none yet).
   List<BleLogEntry> logsFor(String deviceId) =>
@@ -83,7 +63,7 @@ class BluetoothCubit extends Cubit<BluetoothState> {
       // disconnect on their own (e.g. opening/closing the case, picking
       // up/ending a call).
       _globalConnectionSub?.cancel();
-      _globalConnectionSub = _ble.connectionStateStream.listen((event) {
+      _globalConnectionSub = _ble.connectionStateStream.listen((event) async {
         final knownName = _discoveredDevices
             .cast<BleDevice?>()
             .firstWhere(
@@ -95,37 +75,57 @@ class BluetoothCubit extends Cubit<BluetoothState> {
         if (event.isConnected) {
           // Try to construct a BleDevice to update the state
           final dev = BleDevice(deviceId: event.deviceId, name: knownName);
-          _connectedDevice = dev;
-          emit(BluetoothConnected(dev));
+          _connectedDevices[event.deviceId] = dev;
 
-          _log(
+          // ── FIX 1: ensure device appears in the scanner list ──────
+          // Background auto-connect happens in a separate isolate so the
+          // device is never added to _discoveredDevices via _scanSub.
+          // Without this, the scanner screen cannot show a "Connected" badge.
+          if (!_discoveredDevices.any((d) => d.deviceId == event.deviceId)) {
+            _discoveredDevices.add(dev);
+          }
+
+          emit(BluetoothConnected(dev));
+          // Refresh scanner list so the "Connected ✓" badge appears
+          emit(BluetoothScanResult(List.unmodifiable(_discoveredDevices)));
+
+          await _log(
             BleLogEntry.system(
               deviceId: event.deviceId,
               deviceName: knownName,
               type: LogType.connect,
               message:
-                  'Connected'
+                  'Connected to "${knownName ?? event.deviceId}"'
                   '${event.error != null ? " (${event.error})" : ""}',
             ),
           );
+
+          // ── FIX 2: pull in background-written log entries ─────────
+          // The background isolate writes SCAN + CONNECT log entries
+          // directly to storage before sending this connectionChange event.
+          // loadDeviceLogs merges storage entries into the in-memory buffer
+          // then emits BluetoothLogsUpdated so the Logs screen refreshes
+          // live — without needing an app restart.
+          await loadDeviceLogs(event.deviceId);
+          emit(BluetoothLogsUpdated('all', allLogs));
         } else {
           final dev = BleDevice(deviceId: event.deviceId, name: knownName);
           emit(BluetoothDisconnected(dev));
 
-          _log(
+          await _log(
             BleLogEntry.system(
               deviceId: event.deviceId,
               deviceName: knownName,
               type: LogType.disconnect,
               message: event.error != null
-                  ? 'Disconnected — ${event.error}'
-                  : 'Disconnected',
+                  ? 'Disconnected from "${knownName ?? event.deviceId}" — ${event.error}'
+                  : 'Disconnected from "${knownName ?? event.deviceId}"',
             ),
           );
           // Clear connected device if it matches
-          if (_connectedDevice?.deviceId == event.deviceId) {
-            _connectedDevice = null;
-          }
+          _connectedDevices.remove(event.deviceId);
+          // Refresh scanner so the "Connected" badge clears
+          emit(BluetoothScanResult(List.unmodifiable(_discoveredDevices)));
           // Resume scanning to catch the device when it returns
           startScan();
         }
@@ -252,7 +252,9 @@ class BluetoothCubit extends Cubit<BluetoothState> {
 
   /// Start scanning. Already-seen devices are de-duplicated by ID.
   Future<void> startScan({List<String> withServices = const []}) async {
-    _discoveredDevices.clear();
+    // Keep paired devices in the list so they remain visible in the UI
+    // even when disconnected. Only remove devices that have not been paired.
+    _discoveredDevices.removeWhere((d) => !_pairedDeviceIds.contains(d.deviceId));
     emit(BluetoothScanning());
 
     try {
@@ -279,9 +281,10 @@ class BluetoothCubit extends Cubit<BluetoothState> {
           // ── In-app auto-reconnect ──────────────────────────────────
           // If this device is in our paired list and we are not already
           // connecting/connected to it, auto-connect immediately.
+          final currentState = state;
           if (_pairedDeviceIds.contains(device.deviceId) &&
-              state is! BluetoothConnecting &&
-              state is! BluetoothConnected) {
+              !_connectedDevices.containsKey(device.deviceId) &&
+              !(currentState is BluetoothConnecting && currentState.device.deviceId == device.deviceId)) {
             debugPrint(
               '[BLE] Auto-connecting to paired device: ${device.deviceId}',
             );
@@ -311,9 +314,9 @@ class BluetoothCubit extends Cubit<BluetoothState> {
   // SECTION 3 – CONNECTION
   // ══════════════════════════════════════════════
 
-  BleDevice? _connectedDevice;
-  BleDevice? get connectedDevice => _connectedDevice;
-  StreamSubscription<bool>? _connectionSub;
+  final Map<String, BleDevice> _connectedDevices = {};
+  Map<String, BleDevice> get connectedDevices => Map.unmodifiable(_connectedDevices);
+  final Map<String, StreamSubscription<bool>> _connectionSubs = {};
 
   /// Connect to [device] and start monitoring its connection state.
   Future<void> connect(BleDevice device) async {
@@ -328,10 +331,10 @@ class BluetoothCubit extends Cubit<BluetoothState> {
     );
     try {
       await _ble.connect(device);
-      _connectedDevice = device;
+      _connectedDevices[device.deviceId] = device;
 
-      _connectionSub?.cancel();
-      _connectionSub = _ble.connectionStream(device).listen((isConnected) {
+      _connectionSubs[device.deviceId]?.cancel();
+      _connectionSubs[device.deviceId] = _ble.connectionStream(device).listen((isConnected) {
         if (isConnected) {
           emit(BluetoothConnected(device));
           _log(
@@ -344,7 +347,7 @@ class BluetoothCubit extends Cubit<BluetoothState> {
           );
         } else {
           emit(BluetoothDisconnected(device));
-          _connectedDevice = null;
+          _connectedDevices.remove(device.deviceId);
           _log(
             BleLogEntry.system(
               deviceId: device.deviceId,
@@ -375,15 +378,15 @@ class BluetoothCubit extends Cubit<BluetoothState> {
     }
   }
 
-  /// Disconnect from the currently connected device.
-  Future<void> disconnect() async {
-    final device = _connectedDevice;
-    if (device == null) return;
+  /// Disconnect from the specific [device].
+  Future<void> disconnect(BleDevice device) async {
+    if (!_connectedDevices.containsKey(device.deviceId)) return;
     try {
       await _ble.disconnect(device);
-      _connectionSub?.cancel();
+      _connectionSubs[device.deviceId]?.cancel();
+      _connectionSubs.remove(device.deviceId);
       emit(BluetoothDisconnected(device));
-      _connectedDevice = null;
+      _connectedDevices.remove(device.deviceId);
       await _log(
         BleLogEntry.system(
           deviceId: device.deviceId,
@@ -487,7 +490,7 @@ class BluetoothCubit extends Cubit<BluetoothState> {
   // SECTION 6 – SUBSCRIPTIONS
   // ══════════════════════════════════════════════
 
-  StreamSubscription<Uint8List>? _notifySub;
+  final Map<String, StreamSubscription<Uint8List>> _notifySubs = {};
 
   /// Subscribe to notifications (or indications) on [characteristic].
   Future<void> subscribe(
@@ -497,7 +500,7 @@ class BluetoothCubit extends Cubit<BluetoothState> {
     String? deviceName,
   }) async {
     try {
-      _notifySub?.cancel();
+      _notifySubs[characteristic.uuid.toString()]?.cancel();
       void handler(Uint8List data) {
         if (deviceId != null) {
           _log(
@@ -515,10 +518,11 @@ class BluetoothCubit extends Cubit<BluetoothState> {
         emit(BluetoothDataReceived(data));
       }
 
+      final subKey = characteristic.uuid.toString();
       if (useIndications) {
-        _notifySub = await _ble.subscribeIndications(characteristic, handler);
+        _notifySubs[subKey] = await _ble.subscribeIndications(characteristic, handler);
       } else {
-        _notifySub = await _ble.subscribeNotifications(characteristic, handler);
+        _notifySubs[subKey] = await _ble.subscribeNotifications(characteristic, handler);
       }
       if (deviceId != null) {
         await _log(
@@ -538,11 +542,13 @@ class BluetoothCubit extends Cubit<BluetoothState> {
     }
   }
 
-  /// Cancel the active subscription.
+  /// Cancel the active subscription on [characteristic].
   Future<void> unsubscribe(BleCharacteristic characteristic) async {
     try {
       await _ble.unsubscribe(characteristic);
-      _notifySub?.cancel();
+      final subKey = characteristic.uuid.toString();
+      _notifySubs[subKey]?.cancel();
+      _notifySubs.remove(subKey);
     } catch (e) {
       emit(BluetoothError(e.toString()));
     }
@@ -592,6 +598,8 @@ class BluetoothCubit extends Cubit<BluetoothState> {
           pairedDeviceIds: Set.unmodifiable(_pairedDeviceIds),
         ),
       );
+      // 🔥 Connect immediately after successful pair
+      connect(device);
     } catch (e) {
       await _log(
         BleLogEntry.system(
@@ -661,8 +669,12 @@ class BluetoothCubit extends Cubit<BluetoothState> {
     await _availabilitySub?.cancel();
     await _globalConnectionSub?.cancel();
     await _scanSub?.cancel();
-    await _connectionSub?.cancel();
-    await _notifySub?.cancel();
+    for (final sub in _connectionSubs.values) {
+      await sub.cancel();
+    }
+    for (final sub in _notifySubs.values) {
+      await sub.cancel();
+    }
     return super.close();
   }
 }

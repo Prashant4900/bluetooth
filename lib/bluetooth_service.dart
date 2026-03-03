@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:universal_ble/universal_ble.dart';
 
 /// A single connection-state change event from any BLE device.
@@ -53,6 +54,30 @@ class BluetoothService {
   /// Safe to call multiple times – subsequent calls are no-ops
   /// because universal_ble manages its own native state.
   Future<AvailabilityState> initialize() async {
+    // Listen to background isolate events (e.g., disconnects intercepted by the background service)
+    FlutterForegroundTask.addTaskDataCallback((data) {
+      if (data is Map && data['type'] == 'connectionChange') {
+        final deviceId = data['deviceId'] as String?;
+        final isConnected = data['isConnected'] as bool?;
+        final error = data['error'] as String?;
+
+        if (deviceId != null && isConnected != null) {
+          debugPrint(
+            '[BLE-BG-SYNC] Connection change: $deviceId → '
+            '${isConnected ? "connected" : "disconnected"}'
+            '${error != null ? " ($error)" : ""}',
+          );
+          _connectionEventController.add(
+            BleConnectionEvent(
+              deviceId: deviceId,
+              isConnected: isConnected,
+              error: error,
+            ),
+          );
+        }
+      }
+    });
+
     // Set log level so we can see all BLE ops in the console
     // during this POC phase.
     await UniversalBle.setLogLevel(BleLogLevel.verbose);

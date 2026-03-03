@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:bluetooth/models/ble_log_entry.dart';
 import 'package:bluetooth/services/notification_service.dart';
 import 'package:bluetooth/storage/log_storage.dart';
@@ -5,6 +7,8 @@ import 'package:bluetooth/storage/pairing_storage.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:universal_ble/universal_ble.dart';
+// ignore: implementation_imports
+import 'package:universal_ble/src/universal_ble_pigeon/universal_ble.g.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Entry point — called by flutter_foreground_task in the background isolate.
@@ -107,7 +111,16 @@ class _BleTaskHandler extends TaskHandler {
       final paired = await PairingStorage.loadPairedIds();
       if (paired.isEmpty) return;
 
-      await UniversalBle.startScan(scanFilter: ScanFilter(withServices: []));
+      if (Platform.isAndroid || Platform.isIOS || Platform.isMacOS) {
+        final channel = UniversalBlePlatformChannel();
+        await channel.startScan(UniversalScanFilter(
+          withServices: [],
+          withNamePrefix: [],
+          withManufacturerData: [],
+        ));
+      } else {
+        await UniversalBle.startScan(scanFilter: ScanFilter(withServices: []));
+      }
 
       UniversalBle.onScanResult = (device) async {
         if (!paired.contains(device.deviceId)) return;
@@ -160,7 +173,15 @@ class _BleTaskHandler extends TaskHandler {
         }
       };
 
-      UniversalBle.onConnectionChange = (deviceId, isConnected, _) async {
+      UniversalBle.onConnectionChange = (deviceId, isConnected, error) async {
+        // Send state change to main isolate so UI updates when device turns off 
+        FlutterForegroundTask.sendDataToMain({
+          'type': 'connectionChange',
+          'deviceId': deviceId,
+          'isConnected': isConnected,
+          'error': error,
+        });
+
         if (!isConnected) {
           _connected.remove(deviceId);
           await _log(

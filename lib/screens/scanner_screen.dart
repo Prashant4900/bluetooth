@@ -18,20 +18,7 @@ class ScannerScreen extends StatelessWidget {
       appBar: AppBar(
         title: const Text('BLE Scanner'),
         actions: [
-          BlocBuilder<BluetoothCubit, BluetoothState>(
-            builder: (context, state) {
-              final isLmnpOnly = context.read<BluetoothCubit>().showOnlyLmnp;
-              return IconButton(
-                tooltip: isLmnpOnly ? 'Show All Devices' : 'Show LMNP Only',
-                onPressed: () =>
-                    context.read<BluetoothCubit>().toggleLmnpFilter(),
-                icon: Icon(
-                  isLmnpOnly ? Icons.filter_alt : Icons.filter_alt_off,
-                  color: isLmnpOnly ? Colors.greenAccent : Colors.grey,
-                ),
-              );
-            },
-          ),
+          // LMNP filter enforced automatically.
         ],
         bottom: PreferredSize(
           preferredSize: const Size.fromHeight(28),
@@ -74,12 +61,9 @@ class ScannerScreen extends StatelessWidget {
       // ── Device list ──────────────────────────────────────────
       body: BlocBuilder<BluetoothCubit, BluetoothState>(
         builder: (context, state) {
-          final isLmnpOnly = cubit.showOnlyLmnp;
-          final List<BleDevice> devices = isLmnpOnly
-              ? cubit.discoveredDevices
-                    .where((d) => d.name?.startsWith('LMNP') == true)
-                    .toList()
-              : cubit.discoveredDevices;
+          final List<BleDevice> devices = cubit.discoveredDevices
+              .where((d) => d.name?.startsWith('LMNP') == true)
+              .toList();
 
           if (state is BluetoothLoading) {
             return const Center(child: CircularProgressIndicator());
@@ -119,7 +103,7 @@ class ScannerScreen extends StatelessWidget {
               final rssi = device.rssi;
               final isPaired = cubit.pairedDeviceIds.contains(device.deviceId);
               final isConnected =
-                  cubit.connectedDevice?.deviceId == device.deviceId;
+                  cubit.connectedDevices.containsKey(device.deviceId);
 
               return ListTile(
                 leading: CircleAvatar(
