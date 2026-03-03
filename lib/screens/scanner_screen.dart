@@ -1,5 +1,4 @@
 import 'package:bluetooth/cubit/bluetooth_cubit.dart';
-import 'package:bluetooth/screens/device_log_screen.dart';
 import 'package:bluetooth/widgets/device_detail_sheet.dart';
 import 'package:bluetooth/widgets/rssi_chip.dart';
 import 'package:flutter/material.dart';
@@ -15,55 +14,12 @@ class ScannerScreen extends StatelessWidget {
     final cubit = context.read<BluetoothCubit>();
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('BLE Scanner'),
-        actions: [
-          // LMNP filter enforced automatically.
-        ],
-        bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(28),
-          child: BlocBuilder<BluetoothCubit, BluetoothState>(
-            builder: (context, state) {
-              final (label, color) = switch (state) {
-                BluetoothInitialized(:final availabilityState) => (
-                  'BLE: ${availabilityState.name}',
-                  Colors.green,
-                ),
-                BluetoothAvailabilityChanged(:final availabilityState) => (
-                  'BLE: ${availabilityState.name}',
-                  Colors.orange,
-                ),
-                BluetoothScanning() => ('Scanning…', Colors.blue),
-                BluetoothScanStopped() => ('Scan stopped', Colors.grey),
-                BluetoothError(:final message) => (
-                  'Error: $message',
-                  Colors.red,
-                ),
-                _ => ('Initialising…', Colors.grey),
-              };
-              return Container(
-                width: double.infinity,
-                color: color.withValues(alpha: 0.15),
-                padding: const EdgeInsets.symmetric(
-                  vertical: 4,
-                  horizontal: 16,
-                ),
-                child: Text(
-                  label,
-                  style: TextStyle(color: color, fontWeight: FontWeight.w600),
-                ),
-              );
-            },
-          ),
-        ),
-      ),
+      appBar: AppBar(title: const Text('BLE Scanner')),
 
       // ── Device list ──────────────────────────────────────────
       body: BlocBuilder<BluetoothCubit, BluetoothState>(
         builder: (context, state) {
-          final List<BleDevice> devices = cubit.discoveredDevices
-              .where((d) => d.name?.startsWith('LMNP') == true)
-              .toList();
+          final List<BleDevice> devices = cubit.discoveredDevices;
 
           if (state is BluetoothLoading) {
             return const Center(child: CircularProgressIndicator());
@@ -102,8 +58,9 @@ class ScannerScreen extends StatelessWidget {
                   : 'Unknown Device';
               final rssi = device.rssi;
               final isPaired = cubit.pairedDeviceIds.contains(device.deviceId);
-              final isConnected =
-                  cubit.connectedDevices.containsKey(device.deviceId);
+              final isConnected = cubit.connectedDevices.containsKey(
+                device.deviceId,
+              );
 
               return ListTile(
                 leading: CircleAvatar(
@@ -203,16 +160,7 @@ class ScannerScreen extends StatelessWidget {
                     ),
                   ],
                 ),
-                // Tap → full log screen
-                onTap: () => Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => BlocProvider.value(
-                      value: cubit,
-                      child: DeviceLogScreen(device: device),
-                    ),
-                  ),
-                ),
+                // No longer navigate to DeviceLogScreen
               );
             },
           );

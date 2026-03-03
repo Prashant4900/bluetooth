@@ -14,8 +14,7 @@ class AllLogsScreen extends StatefulWidget {
 class _AllLogsScreenState extends State<AllLogsScreen> {
   late final BluetoothCubit _cubit;
   final ScrollController _scrollCtrl = ScrollController();
-  LogFilterType _filter = LogFilterType.all;
-  bool _autoScroll = true;
+  final bool _autoScroll = true;
   String? _selectedDeviceId;
 
   @override
@@ -60,18 +59,7 @@ class _AllLogsScreenState extends State<AllLogsScreen> {
           .toList();
     }
 
-    // 2. Filter by log type
-    return switch (_filter) {
-      LogFilterType.all => filtered,
-      LogFilterType.incoming =>
-        filtered.where((e) => e.direction == LogDirection.incoming).toList(),
-      LogFilterType.outgoing =>
-        filtered.where((e) => e.direction == LogDirection.outgoing).toList(),
-      LogFilterType.system =>
-        filtered.where((e) => e.direction == LogDirection.system).toList(),
-      LogFilterType.errors =>
-        filtered.where((e) => e.type == LogType.error).toList(),
-    };
+    return filtered;
   }
 
   @override
@@ -84,7 +72,7 @@ class _AllLogsScreenState extends State<AllLogsScreen> {
         title: const Text(
           'All Global Logs',
           style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-        )
+        ),
         // ,
         // actions: [
         //   // Filter toggle removed logic
@@ -180,10 +168,6 @@ class _AllLogsScreenState extends State<AllLogsScreen> {
               ],
             ),
           ),
-          LogFilterBar(
-            current: _filter,
-            onChanged: (f) => setState(() => _filter = f),
-          ),
 
           // ── Log list ──
           Expanded(
@@ -238,32 +222,6 @@ class _AllLogsScreenState extends State<AllLogsScreen> {
             ),
           ),
         ],
-      ),
-
-      floatingActionButton: BlocBuilder<BluetoothCubit, BluetoothState>(
-        buildWhen: (_, curr) =>
-            curr is BluetoothLogsUpdated && curr.deviceId == 'all',
-        builder: (context, _) {
-          final count = _applyFilter(_cubit.allLogs).length;
-          return FloatingActionButton.small(
-            onPressed: () {
-              setState(() => _autoScroll = true);
-              _scrollToBottom();
-            },
-            backgroundColor: Colors.deepPurple,
-            tooltip: 'Jump to latest',
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                const Icon(Icons.arrow_downward, size: 14, color: Colors.white),
-                Text(
-                  '$count',
-                  style: const TextStyle(fontSize: 9, color: Colors.white70),
-                ),
-              ],
-            ),
-          );
-        },
       ),
     );
   }

@@ -2,36 +2,6 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 // ─────────────────────────────────────────────────
-// Enums
-// ─────────────────────────────────────────────────
-
-enum LogDirection {
-  /// Data sent from this device to the BLE peripheral.
-  outgoing,
-
-  /// Data received from the BLE peripheral.
-  incoming,
-
-  /// Internal / system event (connect, scan, pair, etc.).
-  system,
-}
-
-enum LogType {
-  scan,
-  connect,
-  disconnect,
-  pair,
-  unpair,
-  read,
-  write,
-  notify,
-  indicate,
-  serviceDiscovery,
-  error,
-  info,
-}
-
-// ─────────────────────────────────────────────────
 // BleLogEntry
 // ─────────────────────────────────────────────────
 
@@ -40,8 +10,7 @@ class BleLogEntry {
   final DateTime timestamp;
   final String deviceId;
   final String? deviceName;
-  final LogDirection direction;
-  final LogType type;
+
   final String message;
 
   /// Raw bytes as an uppercase hex string, e.g. "0A 1B FF"
@@ -55,8 +24,7 @@ class BleLogEntry {
     required this.timestamp,
     required this.deviceId,
     this.deviceName,
-    required this.direction,
-    required this.type,
+
     required this.message,
     this.hexData,
     this.asciiData,
@@ -67,23 +35,20 @@ class BleLogEntry {
   factory BleLogEntry.system({
     required String deviceId,
     String? deviceName,
-    required LogType type,
     required String message,
-  }) => BleLogEntry(
-    id: _id(),
-    timestamp: DateTime.now(),
-    deviceId: deviceId,
-    deviceName: deviceName,
-    direction: LogDirection.system,
-    type: type,
-    message: message,
-  );
+  }) {
+    return BleLogEntry(
+      id: DateTime.now().microsecondsSinceEpoch.toString(),
+      timestamp: DateTime.now(),
+      deviceId: deviceId,
+      deviceName: deviceName,
+      message: message,
+    );
+  }
 
   factory BleLogEntry.data({
     required String deviceId,
     String? deviceName,
-    required LogDirection direction,
-    required LogType type,
     required String message,
     required Uint8List bytes,
   }) {
@@ -93,19 +58,15 @@ class BleLogEntry {
     final isPrintable = bytes.every((b) => b >= 32 && b < 127);
     final ascii = isPrintable ? utf8.decode(bytes, allowMalformed: true) : null;
     return BleLogEntry(
-      id: _id(),
+      id: DateTime.now().microsecondsSinceEpoch.toString(),
       timestamp: DateTime.now(),
       deviceId: deviceId,
       deviceName: deviceName,
-      direction: direction,
-      type: type,
       message: message,
       hexData: hex.isNotEmpty ? hex : null,
       asciiData: ascii,
     );
   }
-
-  static String _id() => DateTime.now().microsecondsSinceEpoch.toString();
 
   // ── JSON ───────────────────────────────────────
 
@@ -114,8 +75,6 @@ class BleLogEntry {
     'ts': timestamp.millisecondsSinceEpoch,
     'dId': deviceId,
     'dName': deviceName,
-    'dir': direction.index,
-    'type': type.index,
     'msg': message,
     'hex': hexData,
     'ascii': asciiData,
@@ -126,8 +85,6 @@ class BleLogEntry {
     timestamp: DateTime.fromMillisecondsSinceEpoch(j['ts'] as int),
     deviceId: j['dId'] as String,
     deviceName: j['dName'] as String?,
-    direction: LogDirection.values[j['dir'] as int],
-    type: LogType.values[j['type'] as int],
     message: j['msg'] as String,
     hexData: j['hex'] as String?,
     asciiData: j['ascii'] as String?,
@@ -142,25 +99,4 @@ class BleLogEntry {
     final ms = timestamp.millisecond.toString().padLeft(3, '0');
     return '$h:$m:$s.$ms';
   }
-
-  String get directionLabel => switch (direction) {
-    LogDirection.outgoing => '↑ OUT',
-    LogDirection.incoming => '↓ IN ',
-    LogDirection.system => '● SYS',
-  };
-
-  String get typeLabel => switch (type) {
-    LogType.scan => 'SCAN',
-    LogType.connect => 'CONNECT',
-    LogType.disconnect => 'DISCONNECT',
-    LogType.pair => 'PAIR',
-    LogType.unpair => 'UNPAIR',
-    LogType.read => 'READ',
-    LogType.write => 'WRITE',
-    LogType.notify => 'NOTIFY',
-    LogType.indicate => 'INDICATE',
-    LogType.serviceDiscovery => 'SERVICES',
-    LogType.error => 'ERROR',
-    LogType.info => 'INFO',
-  };
 }

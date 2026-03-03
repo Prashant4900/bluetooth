@@ -93,24 +93,12 @@ class _LogTileState extends State<LogTile> {
     final e = widget.entry;
     final hasData = e.hexData != null;
 
-    final (dirColor, dirIcon) = switch (e.direction) {
-      LogDirection.incoming => (const Color(0xFF00B4D8), Icons.arrow_downward),
-      LogDirection.outgoing => (const Color(0xFF2DC653), Icons.arrow_upward),
-      LogDirection.system => (const Color(0xFFB0B8C1), Icons.circle),
-    };
-
-    final typeColor = switch (e.type) {
-      LogType.error => Colors.red.shade400,
-      LogType.pair || LogType.unpair => Colors.amber.shade400,
-      LogType.connect => Colors.greenAccent,
-      LogType.disconnect => Colors.orange,
-      _ => Colors.grey.shade500,
-    };
+    final dirColor = Colors.grey;
 
     return GestureDetector(
       onLongPress: () {
         final text =
-            '[${e.timeLabel}] [${e.directionLabel}] [${e.typeLabel}] ${e.message}'
+            '[${e.timeLabel}] ${e.message}'
             '${e.hexData != null ? '\nHEX: ${e.hexData}' : ''}'
             '${e.asciiData != null ? '\nASCII: ${e.asciiData}' : ''}';
         Clipboard.setData(ClipboardData(text: text));
@@ -127,11 +115,7 @@ class _LogTileState extends State<LogTile> {
         decoration: BoxDecoration(
           color: const Color(0xFF161B22),
           borderRadius: BorderRadius.circular(6),
-          border: Border.all(
-            color: e.type == LogType.error
-                ? Colors.red.shade800
-                : Colors.transparent,
-          ),
+          border: Border.all(color: Colors.transparent),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -150,22 +134,20 @@ class _LogTileState extends State<LogTile> {
                     ),
                   ),
                   const SizedBox(width: 8),
-                  Icon(dirIcon, size: 12, color: dirColor),
-                  const SizedBox(width: 4),
                   Container(
                     padding: const EdgeInsets.symmetric(
                       horizontal: 5,
                       vertical: 1,
                     ),
                     decoration: BoxDecoration(
-                      color: typeColor.withValues(alpha: 0.15),
+                      color: Colors.grey.withValues(alpha: 0.15),
                       borderRadius: BorderRadius.circular(3),
                     ),
-                    child: Text(
-                      e.typeLabel,
+                    child: const Text(
+                      'LOG',
                       style: TextStyle(
                         fontSize: 9,
-                        color: typeColor,
+                        color: Colors.grey,
                         fontWeight: FontWeight.bold,
                         letterSpacing: 0.5,
                       ),
@@ -175,12 +157,7 @@ class _LogTileState extends State<LogTile> {
                   Expanded(
                     child: Text(
                       e.message,
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: e.type == LogType.error
-                            ? Colors.red.shade300
-                            : Colors.white70,
-                      ),
+                      style: TextStyle(fontSize: 12, color: Colors.white70),
                     ),
                   ),
                   if (hasData)

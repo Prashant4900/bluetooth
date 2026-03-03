@@ -6,9 +6,9 @@ import 'package:bluetooth/storage/log_storage.dart';
 import 'package:bluetooth/storage/pairing_storage.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
-import 'package:universal_ble/universal_ble.dart';
 // ignore: implementation_imports
 import 'package:universal_ble/src/universal_ble_pigeon/universal_ble.g.dart';
+import 'package:universal_ble/universal_ble.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Entry point — called by flutter_foreground_task in the background isolate.
@@ -113,11 +113,13 @@ class _BleTaskHandler extends TaskHandler {
 
       if (Platform.isAndroid || Platform.isIOS || Platform.isMacOS) {
         final channel = UniversalBlePlatformChannel();
-        await channel.startScan(UniversalScanFilter(
-          withServices: [],
-          withNamePrefix: [],
-          withManufacturerData: [],
-        ));
+        await channel.startScan(
+          UniversalScanFilter(
+            withServices: [],
+            withNamePrefix: [],
+            withManufacturerData: [],
+          ),
+        );
       } else {
         await UniversalBle.startScan(scanFilter: ScanFilter(withServices: []));
       }
@@ -131,8 +133,6 @@ class _BleTaskHandler extends TaskHandler {
         await _log(
           device.deviceId,
           device.name,
-          LogDirection.system,
-          LogType.scan,
           '[BG] Paired device in range — auto-connecting…',
         );
 
@@ -144,8 +144,6 @@ class _BleTaskHandler extends TaskHandler {
           await _log(
             device.deviceId,
             device.name,
-            LogDirection.incoming,
-            LogType.connect,
             '[BG] Auto-connected successfully (background)',
           );
 
@@ -166,15 +164,13 @@ class _BleTaskHandler extends TaskHandler {
           await _log(
             device.deviceId,
             device.name,
-            LogDirection.system,
-            LogType.error,
             '[BG] Auto-connect failed: $e',
           );
         }
       };
 
       UniversalBle.onConnectionChange = (deviceId, isConnected, error) async {
-        // Send state change to main isolate so UI updates when device turns off 
+        // Send state change to main isolate so UI updates when device turns off
         FlutterForegroundTask.sendDataToMain({
           'type': 'connectionChange',
           'deviceId': deviceId,
@@ -187,8 +183,6 @@ class _BleTaskHandler extends TaskHandler {
           await _log(
             deviceId,
             null,
-            LogDirection.system,
-            LogType.disconnect,
             '[BG] Device disconnected — waiting to reconnect',
           );
           FlutterForegroundTask.updateService(
@@ -211,18 +205,11 @@ class _BleTaskHandler extends TaskHandler {
     }
   }
 
-  Future<void> _log(
-    String deviceId,
-    String? deviceName,
-    LogDirection direction,
-    LogType type,
-    String message,
-  ) async {
+  Future<void> _log(String deviceId, String? deviceName, String message) async {
     try {
       final entry = BleLogEntry.system(
         deviceId: deviceId,
         deviceName: deviceName,
-        type: type,
         message: message,
       );
       await LogStorage.appendLog(entry);
