@@ -32,6 +32,8 @@ class BluetoothService {
   Stream<BleConnectionEvent> get connectionStateStream =>
       _connectionEventController.stream;
 
+  bool _initialized = false;
+
   // ══════════════════════════════════════════════
   // SECTION 1 – INITIALIZE
   // ══════════════════════════════════════════════
@@ -45,29 +47,49 @@ class BluetoothService {
   /// Safe to call multiple times – subsequent calls are no-ops
   /// because universal_ble manages its own native state.
   Future<AvailabilityState> initialize() async {
-    // Listen to background isolate events (e.g., disconnects intercepted by the background service)
-    FlutterForegroundTask.addTaskDataCallback((data) {
-      if (data is Map && data['type'] == 'connectionChange') {
-        final deviceId = data['deviceId'] as String?;
-        final isConnected = data['isConnected'] as bool?;
-        final error = data['error'] as String?;
+    if (!_initialized) {
+      _initialized = true;
 
-        if (deviceId != null && isConnected != null) {
-          debugPrint(
-            '[BLE-BG-SYNC] Connection change: $deviceId → '
-            '${isConnected ? "connected" : "disconnected"}'
-            '${error != null ? " ($error)" : ""}',
-          );
-          _connectionEventController.add(
-            BleConnectionEvent(
-              deviceId: deviceId,
-              isConnected: isConnected,
-              error: error,
-            ),
-          );
+      // Receive connection events forwarded by the background isolate.
+      FlutterForegroundTask.addTaskDataCallback((data) {
+        if (data is Map && data['type'] == 'connectionChange') {
+          final deviceId = data['deviceId'] as String?;
+          final isConnected = data['isConnected'] as bool?;
+          final error = data['error'] as String?;
+
+          if (deviceId != null && isConnected != null) {
+            debugPrint(
+              '[BLE-BG-SYNC] Connection change: $deviceId → '
+              '${isConnected ? "connected" : "disconnected"}'
+              '${error != null ? " ($error)" : ""}',
+            );
+            _connectionEventController.add(
+              BleConnectionEvent(
+                deviceId: deviceId,
+                isConnected: isConnected,
+                error: error,
+              ),
+            );
+          }
         }
-      }
-    });
+      });
+
+      // Fire for ALL connection changes at the platform level.
+      UniversalBle.onConnectionChange = (deviceId, isConnected, error) {
+        debugPrint(
+          '[BLE] Connection change: $deviceId → '
+          '${isConnected ? "connected" : "disconnected"}'
+          '${error != null ? " ($error)" : ""}',
+        );
+        _connectionEventController.add(
+          BleConnectionEvent(
+            deviceId: deviceId,
+            isConnected: isConnected,
+            error: error,
+          ),
+        );
+      };
+    }
 
     // Set log level, queue type, and timeout.
     await UniversalBle.setLogLevel(BleLogLevel.verbose);
@@ -76,22 +98,6 @@ class BluetoothService {
 
     UniversalBle.onAvailabilityChange = (AvailabilityState state) {
       debugPrint('[BLE] Availability changed → $state');
-    };
-
-    // Listen for connection changes from any device (including system-paired ones).
-    UniversalBle.onConnectionChange = (deviceId, isConnected, error) {
-      debugPrint(
-        '[BLE] Connection change: $deviceId → '
-        '${isConnected ? "connected" : "disconnected"}'
-        '${error != null ? " ($error)" : ""}',
-      );
-      _connectionEventController.add(
-        BleConnectionEvent(
-          deviceId: deviceId,
-          isConnected: isConnected,
-          error: error,
-        ),
-      );
     };
 
     final state = await UniversalBle.getBluetoothAvailabilityState();

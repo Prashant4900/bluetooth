@@ -64,6 +64,35 @@ class BluetoothCubit extends Cubit<BluetoothState> {
             _discoveredDevices.add(dev);
           }
 
+          // Re-establish per-device disconnect listener so future disconnects
+          // are caught even when the connection was made by the background service.
+          _connectionSubs[event.deviceId]?.cancel();
+          _connectionSubs[event.deviceId] = _ble.connectionStream(dev).listen((
+            isConnected,
+          ) {
+            if (!isConnected) {
+              emit(
+                BluetoothConnectionState(
+                  device: dev,
+                  status: BleConnectionStatus.disconnected,
+                ),
+              );
+              _connectedDevices.remove(dev.deviceId);
+              _log(
+                BleLogEntry.system(
+                  deviceId: dev.deviceId,
+                  deviceName: dev.name,
+                  message: 'Disconnected from "${dev.name ?? dev.deviceId}"',
+                ),
+              );
+              NotificationService.showNotification(
+                id: dev.deviceId.hashCode ^ 3,
+                title: 'Device Disconnected',
+                body: 'Lost connection to ${dev.name ?? dev.deviceId}',
+              );
+            }
+          });
+
           emit(
             BluetoothConnectionState(
               device: dev,
@@ -87,7 +116,7 @@ class BluetoothCubit extends Cubit<BluetoothState> {
             ),
           );
 
-          // Merge any logs written by the background service during auto-connect.
+          // Pull in any logs written by the background service during reconnect.
           await loadDeviceLogs(event.deviceId);
           emit(BluetoothLogsUpdated('all', allLogs));
         } else {
@@ -207,12 +236,13 @@ class BluetoothCubit extends Cubit<BluetoothState> {
     try {
       _scanSub?.cancel();
       _scanSub = _ble.scanStream.listen((device) {
+        // Ignore non-LMNP devices.
+        if (device.name?.startsWith('LMNP') != true) return;
+
         final exists = _discoveredDevices.any(
           (d) => d.deviceId == device.deviceId,
         );
         if (!exists) {
-          // Ignore non-LMNP devices.
-          if (device.name?.startsWith('LMNP') != true) return;
           _discoveredDevices.add(device);
           emit(
             BluetoothScanState(
@@ -229,19 +259,21 @@ class BluetoothCubit extends Cubit<BluetoothState> {
                   '${device.rssi != null ? " — RSSI ${device.rssi} dBm" : ""}',
             ),
           );
+        }
 
-          // Auto-connect if paired and not already connecting or connected.
-          final currentState = state;
-          if (_pairedDeviceIds.contains(device.deviceId) &&
-              !_connectedDevices.containsKey(device.deviceId) &&
-              !(currentState is BluetoothConnectionState &&
-                  currentState.device.deviceId == device.deviceId &&
-                  currentState.status == BleConnectionStatus.connecting)) {
-            debugPrint(
-              '[BLE] Auto-connecting to paired device: ${device.deviceId}',
-            );
-            connect(device);
-          }
+        // Auto-connect if paired and not already connected or connecting.
+        // This check runs whether the device is newly discovered OR already
+        // in the list — covering the re-scan-after-background-reconnect case.
+        final currentState = state;
+        if (_pairedDeviceIds.contains(device.deviceId) &&
+            !_connectedDevices.containsKey(device.deviceId) &&
+            !(currentState is BluetoothConnectionState &&
+                currentState.device.deviceId == device.deviceId &&
+                currentState.status == BleConnectionStatus.connecting)) {
+          debugPrint(
+            '[BLE] Auto-connecting to paired device: ${device.deviceId}',
+          );
+          connect(device);
         }
       });
 
