@@ -5,7 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:universal_ble/universal_ble.dart';
 
-/// Modal bottom sheet that shows all BleDevice fields and a Pair/Unpair button.
+/// Modal bottom sheet showing key details and Pair/Unpair action for a BLE device.
 class DeviceDetailSheet extends StatelessWidget {
   const DeviceDetailSheet({super.key, required this.device});
   final BleDevice device;
@@ -13,7 +13,6 @@ class DeviceDetailSheet extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final ts = device.timestampDateTime;
-    final mfList = device.manufacturerDataList;
 
     return BlocConsumer<BluetoothCubit, BluetoothState>(
       listenWhen: (_, curr) =>
@@ -53,9 +52,9 @@ class DeviceDetailSheet extends StatelessWidget {
             state.deviceId == device.deviceId;
 
         return DraggableScrollableSheet(
-          initialChildSize: 0.65,
-          minChildSize: 0.4,
-          maxChildSize: 0.95,
+          initialChildSize: 0.5,
+          minChildSize: 0.35,
+          maxChildSize: 0.75,
           expand: false,
           builder: (_, controller) {
             return Column(
@@ -105,15 +104,6 @@ class DeviceDetailSheet extends StatelessWidget {
                                 fontWeight: FontWeight.bold,
                               ),
                             ),
-                            if (device.rawName != null &&
-                                device.rawName != device.name)
-                              Text(
-                                'Raw: ${device.rawName}',
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  color: Colors.grey.shade600,
-                                ),
-                              ),
                             if (isStoredPaired)
                               Text(
                                 'Saved as Paired ✓',
@@ -204,25 +194,10 @@ class DeviceDetailSheet extends StatelessWidget {
                             : 'Not available',
                       ),
                       DetailInfoRow(
-                        icon: Icons.lock,
-                        label: 'OS Paired',
-                        value: device.paired == null
-                            ? 'Unknown'
-                            : device.paired!
-                            ? 'Yes ✓'
-                            : 'No',
-                        valueColor: device.paired == true ? Colors.green : null,
-                      ),
-                      DetailInfoRow(
                         icon: Icons.save,
                         label: 'App Paired',
                         value: isStoredPaired ? 'Yes ✓' : 'No',
                         valueColor: isStoredPaired ? Colors.green : null,
-                      ),
-                      DetailInfoRow(
-                        icon: Icons.settings_bluetooth,
-                        label: 'System Device',
-                        value: device.isSystemDevice == true ? 'Yes' : 'No',
                       ),
                       DetailInfoRow(
                         icon: Icons.access_time,
@@ -233,49 +208,6 @@ class DeviceDetailSheet extends StatelessWidget {
                                   '${ts.second.toString().padLeft(2, "0")}'
                             : 'Unknown',
                       ),
-                      const SizedBox(height: 8),
-                      DetailSectionHeader(
-                        icon: Icons.miscellaneous_services,
-                        label:
-                            'Advertised Services (${device.services.length})',
-                      ),
-                      if (device.services.isEmpty)
-                        const DetailEmptyRow('No services advertised')
-                      else
-                        ...device.services.map(
-                          (s) => DetailInfoRow(
-                            icon: Icons.circle,
-                            iconSize: 8,
-                            label: '',
-                            value: s,
-                            selectable: true,
-                          ),
-                        ),
-                      const SizedBox(height: 8),
-                      DetailSectionHeader(
-                        icon: Icons.factory,
-                        label: 'Manufacturer Data (${mfList.length})',
-                      ),
-                      if (mfList.isEmpty)
-                        const DetailEmptyRow('No manufacturer data')
-                      else
-                        ...mfList.map((mf) {
-                          final hex = mf.payload
-                              .map(
-                                (b) => b
-                                    .toRadixString(16)
-                                    .padLeft(2, '0')
-                                    .toUpperCase(),
-                              )
-                              .join(' ');
-                          return DetailInfoRow(
-                            icon: Icons.memory,
-                            label:
-                                'Company 0x${mf.companyId.toRadixString(16).toUpperCase().padLeft(4, "0")}',
-                            value: hex.isNotEmpty ? hex : '(empty)',
-                            selectable: true,
-                          );
-                        }),
                       const SizedBox(height: 24),
                     ],
                   ),

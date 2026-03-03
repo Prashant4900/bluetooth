@@ -110,36 +110,9 @@ class BluetoothCubit extends Cubit<BluetoothState> {
 
       if (availState == AvailabilityState.poweredOn) {
         await startScan();
-        await _checkSystemDevices();
       }
     } catch (e) {
       emit(BluetoothError(e.toString()));
-    }
-  }
-
-  /// Queries devices already connected at the OS level and adds them to the discovered list.
-  Future<void> _checkSystemDevices() async {
-    try {
-      final systemDevices = await _ble.getSystemDevices();
-      for (final device in systemDevices) {
-        // Only track LMNP devices.
-        if (device.name?.startsWith('LMNP') != true) continue;
-        if (!_discoveredDevices.any((d) => d.deviceId == device.deviceId)) {
-          _discoveredDevices.add(device);
-        }
-        await _log(
-          BleLogEntry.system(
-            deviceId: device.deviceId,
-            deviceName: device.name,
-            message: 'Already connected (system/OS paired device)',
-          ),
-        );
-      }
-      if (systemDevices.isNotEmpty) {
-        emit(BluetoothScanResult(List.unmodifiable(_discoveredDevices)));
-      }
-    } catch (_) {
-      // Ignore — not all platforms support system device queries.
     }
   }
 
