@@ -16,18 +16,22 @@ class DeviceDetailSheet extends StatelessWidget {
 
     return BlocConsumer<BluetoothCubit, BluetoothState>(
       listenWhen: (_, curr) =>
-          curr is BluetoothPaired || curr is BluetoothError,
+          curr is BluetoothPairingState || curr is BluetoothError,
       listener: (context, state) {
-        if (state is BluetoothPaired && state.deviceId == device.deviceId) {
+        if (state is BluetoothPairingState &&
+            !state.isLoading &&
+            state.changedDeviceId == device.deviceId) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text(
-                state.isPaired
+                state.isPaired == true
                     ? '✓ Paired and saved!'
                     : '✓ Unpaired and removed from storage',
               ),
               behavior: SnackBarBehavior.floating,
-              backgroundColor: state.isPaired ? Colors.green : Colors.orange,
+              backgroundColor: state.isPaired == true
+                  ? Colors.green
+                  : Colors.orange,
             ),
           );
         } else if (state is BluetoothError) {
@@ -41,15 +45,14 @@ class DeviceDetailSheet extends StatelessWidget {
         }
       },
       buildWhen: (_, curr) =>
-          curr is BluetoothPairedDevicesLoaded ||
-          curr is BluetoothPaired ||
-          curr is BluetoothPairingInProgress,
+          curr is BluetoothPairingState || curr is BluetoothError,
       builder: (context, state) {
         final cubit = context.read<BluetoothCubit>();
         final isStoredPaired = cubit.pairedDeviceIds.contains(device.deviceId);
         final isPairing =
-            state is BluetoothPairingInProgress &&
-            state.deviceId == device.deviceId;
+            state is BluetoothPairingState &&
+            state.isLoading &&
+            state.changedDeviceId == device.deviceId;
 
         return DraggableScrollableSheet(
           initialChildSize: 0.5,

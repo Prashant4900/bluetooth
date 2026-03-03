@@ -1,10 +1,5 @@
 part of 'bluetooth_cubit.dart';
 
-// ─────────────────────────────────────────────────
-// BluetoothState hierarchy
-// Each state maps to one of the service sections.
-// ─────────────────────────────────────────────────
-
 sealed class BluetoothState extends Equatable {
   const BluetoothState();
 
@@ -12,137 +7,60 @@ sealed class BluetoothState extends Equatable {
   List<Object?> get props => [];
 }
 
-// ── SECTION 1: INITIALIZE ──────────────────────
-final class BluetoothInitial extends BluetoothState {}
-
+// ── INITIALIZE ─────────────────────────────────
 final class BluetoothLoading extends BluetoothState {}
 
-/// BLE stack is ready; carries the current availability state.
-final class BluetoothInitialized extends BluetoothState {
-  final AvailabilityState availabilityState;
-  const BluetoothInitialized(this.availabilityState);
-
-  @override
-  List<Object?> get props => [availabilityState];
-}
-
-/// Bluetooth availability changed after initialization.
-final class BluetoothAvailabilityChanged extends BluetoothState {
-  final AvailabilityState availabilityState;
-  const BluetoothAvailabilityChanged(this.availabilityState);
-
-  @override
-  List<Object?> get props => [availabilityState];
-}
-
-// ── SECTION 2: SCANNING ────────────────────────
-final class BluetoothScanning extends BluetoothState {}
-
-final class BluetoothScanResult extends BluetoothState {
+// ── SCANNING ───────────────────────────────────
+/// Covers both "scanning in progress" and "scan results" in one state.
+final class BluetoothScanState extends BluetoothState {
   final List<BleDevice> devices;
-  const BluetoothScanResult(this.devices);
+  final bool isScanning;
+  const BluetoothScanState({required this.devices, required this.isScanning});
 
   @override
-  List<Object?> get props => [devices];
+  List<Object?> get props => [devices, isScanning];
 }
 
-final class BluetoothScanStopped extends BluetoothState {}
+// ── CONNECTION ─────────────────────────────────
+enum BleConnectionStatus { connecting, connected, disconnected }
 
-// ── SECTION 3: CONNECTION ──────────────────────
-final class BluetoothConnecting extends BluetoothState {
+/// Covers connecting, connected, and disconnected in one state.
+final class BluetoothConnectionState extends BluetoothState {
   final BleDevice device;
-  const BluetoothConnecting(this.device);
+  final BleConnectionStatus status;
+  const BluetoothConnectionState({required this.device, required this.status});
 
   @override
-  List<Object?> get props => [device.deviceId];
+  List<Object?> get props => [device.deviceId, status];
 }
 
-final class BluetoothConnected extends BluetoothState {
-  final BleDevice device;
-  const BluetoothConnected(this.device);
-
-  @override
-  List<Object?> get props => [device.deviceId];
-}
-
-final class BluetoothDisconnected extends BluetoothState {
-  final BleDevice device;
-  const BluetoothDisconnected(this.device);
-
-  @override
-  List<Object?> get props => [device.deviceId];
-}
-
-// ── SECTION 4: SERVICE DISCOVERY ──────────────
-final class BluetoothServicesDiscovered extends BluetoothState {
-  final BleDevice device;
-  final List<BleService> services;
-  const BluetoothServicesDiscovered(this.device, this.services);
-
-  @override
-  List<Object?> get props => [device.deviceId, services.length];
-}
-
-// ── SECTION 5: READ / WRITE ────────────────────
-final class BluetoothDataRead extends BluetoothState {
-  final Uint8List data;
-  const BluetoothDataRead(this.data);
-
-  @override
-  List<Object?> get props => [data];
-}
-
-final class BluetoothDataWritten extends BluetoothState {}
-
-// ── SECTION 6: SUBSCRIPTIONS ──────────────────
-final class BluetoothSubscribed extends BluetoothState {}
-
-final class BluetoothDataReceived extends BluetoothState {
-  final Uint8List data;
-  const BluetoothDataReceived(this.data);
-
-  @override
-  List<Object?> get props => [data];
-}
-
-// ── SECTION 7: PAIRING ────────────────────────
-
-/// Emitted once on startup with all stored paired device IDs.
-final class BluetoothPairedDevicesLoaded extends BluetoothState {
+// ── PAIRING ────────────────────────────────────
+/// Covers initial load, in-progress, and pair/unpair result in one state.
+/// - [isLoading] true while an operation is in progress.
+/// - [changedDeviceId] and [isPaired] are set after completion (null on initial load).
+final class BluetoothPairingState extends BluetoothState {
   final Set<String> pairedDeviceIds;
-  const BluetoothPairedDevicesLoaded(this.pairedDeviceIds);
+  final bool isLoading;
+  final String? changedDeviceId;
+  final bool? isPaired;
 
-  @override
-  List<Object?> get props => [pairedDeviceIds];
-}
-
-/// Pairing operation in progress for [deviceId].
-final class BluetoothPairingInProgress extends BluetoothState {
-  final String deviceId;
-  const BluetoothPairingInProgress(this.deviceId);
-
-  @override
-  List<Object?> get props => [deviceId];
-}
-
-/// Pairing result for [deviceId].
-final class BluetoothPaired extends BluetoothState {
-  final String deviceId;
-  final bool isPaired;
-
-  /// Updated full set of IDs now stored in SharedPreferences.
-  final Set<String> pairedDeviceIds;
-  const BluetoothPaired({
-    required this.deviceId,
-    required this.isPaired,
+  const BluetoothPairingState({
     required this.pairedDeviceIds,
+    this.isLoading = false,
+    this.changedDeviceId,
+    this.isPaired,
   });
 
   @override
-  List<Object?> get props => [deviceId, isPaired, pairedDeviceIds];
+  List<Object?> get props => [
+    pairedDeviceIds,
+    isLoading,
+    changedDeviceId,
+    isPaired,
+  ];
 }
 
-// ── SECTION 8: LOGS ───────────────────────────
+// ── LOGS ───────────────────────────────────────
 final class BluetoothLogsUpdated extends BluetoothState {
   final String deviceId;
   final List<BleLogEntry> logs;
@@ -152,7 +70,7 @@ final class BluetoothLogsUpdated extends BluetoothState {
   List<Object?> get props => [deviceId, logs.length];
 }
 
-// ── GLOBAL ERROR ──────────────────────────────
+// ── ERROR ──────────────────────────────────────
 final class BluetoothError extends BluetoothState {
   final String message;
   const BluetoothError(this.message);

@@ -37,7 +37,7 @@ class ScannerScreen extends StatelessWidget {
                   ),
                   const SizedBox(height: 16),
                   Text(
-                    state is BluetoothScanning
+                    state is BluetoothScanState && state.isScanning
                         ? 'Looking for devices…'
                         : 'Press ▶ to start scanning',
                     style: const TextStyle(fontSize: 16, color: Colors.grey),
@@ -170,7 +170,7 @@ class ScannerScreen extends StatelessWidget {
       // ── Scan FAB ─────────────────────────────────────────────
       floatingActionButton: BlocBuilder<BluetoothCubit, BluetoothState>(
         builder: (context, state) {
-          final isScanning = state is BluetoothScanning;
+          final isScanning = state is BluetoothScanState && state.isScanning;
           return FloatingActionButton.extended(
             onPressed: () {
               if (isScanning) {

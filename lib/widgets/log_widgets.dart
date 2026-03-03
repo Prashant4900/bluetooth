@@ -2,77 +2,6 @@ import 'package:bluetooth/models/ble_log_entry.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-/// Enum for the log list filter state.
-enum LogFilterType { all, incoming, outgoing, system, errors }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// LogFilterBar
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Horizontal scrollable filter chip bar for the log screen.
-class LogFilterBar extends StatelessWidget {
-  const LogFilterBar({
-    super.key,
-    required this.current,
-    required this.onChanged,
-  });
-
-  final LogFilterType current;
-  final ValueChanged<LogFilterType> onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      color: const Color(0xFF161B22),
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: Row(
-          children: [
-            _chip('All', LogFilterType.all, Icons.list),
-            _chip('In', LogFilterType.incoming, Icons.arrow_downward),
-            _chip('Out', LogFilterType.outgoing, Icons.arrow_upward),
-            _chip('System', LogFilterType.system, Icons.settings),
-            _chip('Errors', LogFilterType.errors, Icons.error_outline),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _chip(String label, LogFilterType type, IconData icon) {
-    final selected = current == type;
-    return Padding(
-      padding: const EdgeInsets.only(right: 6),
-      child: FilterChip(
-        label: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 13, color: selected ? Colors.white : Colors.grey),
-            const SizedBox(width: 4),
-            Text(
-              label,
-              style: TextStyle(
-                fontSize: 12,
-                color: selected ? Colors.white : Colors.grey,
-              ),
-            ),
-          ],
-        ),
-        selected: selected,
-        onSelected: (_) => onChanged(type),
-        backgroundColor: const Color(0xFF21262D),
-        selectedColor: Colors.deepPurple,
-        checkmarkColor: Colors.transparent,
-        side: BorderSide(
-          color: selected ? Colors.deepPurple : Colors.grey.shade800,
-        ),
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-      ),
-    );
-  }
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // LogTile — a single log entry row
 // ─────────────────────────────────────────────────────────────────────────────
@@ -92,8 +21,6 @@ class _LogTileState extends State<LogTile> {
   Widget build(BuildContext context) {
     final e = widget.entry;
     final hasData = e.hexData != null;
-
-    final dirColor = Colors.grey;
 
     return GestureDetector(
       onLongPress: () {
@@ -157,7 +84,10 @@ class _LogTileState extends State<LogTile> {
                   Expanded(
                     child: Text(
                       e.message,
-                      style: TextStyle(fontSize: 12, color: Colors.white70),
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: Colors.white70,
+                      ),
                     ),
                   ),
                   if (hasData)
@@ -182,7 +112,7 @@ class _LogTileState extends State<LogTile> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     const Divider(color: Color(0xFF30363D), height: 8),
-                    _dataRow('HEX', e.hexData!, dirColor),
+                    _dataRow('HEX', e.hexData!, Colors.grey),
                     if (e.asciiData != null)
                       _dataRow('ASCII', e.asciiData!, Colors.grey.shade400),
                   ],
