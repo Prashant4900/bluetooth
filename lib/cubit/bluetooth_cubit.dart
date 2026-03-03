@@ -145,7 +145,10 @@ class BluetoothCubit extends Cubit<BluetoothState> {
               isScanning: false,
             ),
           );
-          startScan();
+          // Note: do NOT call startScan() here.
+          // The background service already restarts its own scan on disconnect
+          // and calling stopScanIfActive() would cancel it.
+          // The main isolate's _scanSub remains active for foreground reconnects.
         }
       });
 
