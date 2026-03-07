@@ -4,7 +4,6 @@ import 'package:bloc/bloc.dart';
 import 'package:bluetooth/bluetooth_service.dart';
 import 'package:bluetooth/models/ble_log_entry.dart';
 import 'package:bluetooth/services/background_service_bridge.dart';
-import 'package:bluetooth/services/notification_service.dart';
 import 'package:bluetooth/storage/log_storage.dart';
 import 'package:bluetooth/storage/pairing_storage.dart';
 import 'package:equatable/equatable.dart';
@@ -84,11 +83,6 @@ class BluetoothCubit extends Cubit<BluetoothState> {
                   deviceName: dev.name,
                   message: 'Disconnected from "${dev.name ?? dev.deviceId}"',
                 ),
-              );
-              NotificationService.showNotification(
-                id: dev.deviceId.hashCode ^ 3,
-                title: 'Device Disconnected',
-                body: 'Lost connection to ${dev.name ?? dev.deviceId}',
               );
             }
           });
@@ -349,11 +343,6 @@ class BluetoothCubit extends Cubit<BluetoothState> {
               message: 'Disconnected from "${device.name ?? device.deviceId}"',
             ),
           );
-          NotificationService.showNotification(
-            id: device.deviceId.hashCode ^ 3,
-            title: 'Device Disconnected',
-            body: 'Lost connection to ${device.name ?? device.deviceId}',
-          );
         }
       });
 
@@ -569,11 +558,6 @@ class BluetoothCubit extends Cubit<BluetoothState> {
           deviceName: device.name,
           message: 'Paired successfully & saved to storage',
         ),
-      );
-      await NotificationService.showNotification(
-        id: device.deviceId.hashCode ^ 4,
-        title: 'Device Paired',
-        body: 'Successfully paired with ${device.name ?? device.deviceId}',
       );
       await BackgroundServiceBridge.start();
       emit(
