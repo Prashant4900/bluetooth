@@ -16,6 +16,16 @@ class BleLogRepository {
   /// Adds [entry] to the in-memory buffer, persists it, and broadcasts the update.
   Future<void> addLog(BleLogEntry entry) async {
     final list = _deviceLogs.putIfAbsent(entry.deviceId, () => []);
+
+    // Deduplication check: ignore if the exact same message was logged <1s ago
+    if (list.isNotEmpty) {
+      final lastLog = list.last;
+      if (lastLog.message == entry.message &&
+          entry.timestamp.difference(lastLog.timestamp).inMilliseconds < 1000) {
+        return;
+      }
+    }
+
     list.add(entry);
     _logUpdateController.add(entry.deviceId);
     _logUpdateController.add('all');

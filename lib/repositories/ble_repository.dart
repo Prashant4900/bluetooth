@@ -47,6 +47,7 @@ class BleRepository {
   final Map<String, BleDevice> _connectedDevices = {};
   Map<String, BleDevice> get connectedDevices =>
       Map.unmodifiable(_connectedDevices);
+  final Set<String> _connectingDevices = {};
 
   final _connectionStateController =
       StreamController<RepoConnectionEvent>.broadcast();
@@ -63,7 +64,6 @@ class BleRepository {
   // ── INTERNAL SUBSCRIPTIONS ──────────────────────────────────
   StreamSubscription<BleConnectionEvent>? _globalConnectionSub;
   StreamSubscription<BleDevice>? _scanSub;
-  final Map<String, StreamSubscription<bool>> _connectionSubs = {};
   final Map<String, StreamSubscription<Uint8List>> _notifySubs = {};
 
   // ── INITIALIZE ──────────────────────────────────────────────
@@ -87,6 +87,7 @@ class BleRepository {
         if (knownName?.startsWith('LMNP') != true) return;
 
         if (event.isConnected) {
+          _connectingDevices.remove(event.deviceId);
           final dev = BleDevice(deviceId: event.deviceId, name: knownName);
           _connectedDevices[event.deviceId] = dev;
 
@@ -94,25 +95,6 @@ class BleRepository {
             _discoveredDevices.add(dev);
             _scanStateController.add(null);
           }
-
-          _connectionSubs[event.deviceId]?.cancel();
-          _connectionSubs[event.deviceId] = ble.connectionStream(dev).listen((
-            isConnected,
-          ) {
-            if (!isConnected) {
-              _connectedDevices.remove(dev.deviceId);
-              _connectionStateController.add(
-                RepoConnectionEvent(dev, RepoConnectionStatus.disconnected),
-              );
-              logRepository.addLog(
-                BleLogEntry.system(
-                  deviceId: dev.deviceId,
-                  deviceName: dev.name,
-                  message: 'Disconnected from "${dev.name ?? dev.deviceId}"',
-                ),
-              );
-            }
-          });
 
           _connectionStateController.add(
             RepoConnectionEvent(dev, RepoConnectionStatus.connected),
@@ -129,6 +111,7 @@ class BleRepository {
 
           await logRepository.loadDeviceLogs(event.deviceId);
         } else {
+          _connectingDevices.remove(event.deviceId);
           final dev = BleDevice(deviceId: event.deviceId, name: knownName);
           _connectedDevices.remove(event.deviceId);
           _connectionStateController.add(
@@ -190,10 +173,9 @@ class BleRepository {
         }
 
         if (_pairedDeviceIds.contains(device.deviceId) &&
-            !_connectedDevices.containsKey(device.deviceId)) {
-          // Avoid auto-connecting if already connecting, though hard to track precisely without checking cubit.
-          // By default, just call connect.
-          connect(device);
+            !_connectedDevices.containsKey(device.deviceId) &&
+            !_connectingDevices.contains(device.deviceId)) {
+          connect(device, delay: const Duration(milliseconds: 800));
         }
       });
 
@@ -215,7 +197,25 @@ class BleRepository {
   }
 
   // ── CONNECTION ──────────────────────────────────────────────
-  Future<void> connect(BleDevice device) async {
+  Future<void> connect(
+    BleDevice device, {
+    Duration delay = Duration.zero,
+  }) async {
+    if (_connectingDevices.contains(device.deviceId) ||
+        _connectedDevices.containsKey(device.deviceId)) {
+      return;
+    }
+
+    _connectingDevices.add(device.deviceId);
+
+    if (delay > Duration.zero) {
+      await Future.delayed(delay);
+      // Double check state hasn't changed during the delay
+      if (_connectedDevices.containsKey(device.deviceId)) {
+        _connectingDevices.remove(device.deviceId);
+        return;
+      }
+    }
     _connectionStateController.add(
       RepoConnectionEvent(device, RepoConnectionStatus.connecting),
     );
@@ -228,31 +228,9 @@ class BleRepository {
     );
     try {
       await ble.connect(device);
-      _connectedDevices[device.deviceId] = device;
-
-      _connectionSubs[device.deviceId]?.cancel();
-      _connectionSubs[device.deviceId] = ble.connectionStream(device).listen((
-        isConnected,
-      ) {
-        if (!isConnected) {
-          _connectedDevices.remove(device.deviceId);
-          _connectionStateController.add(
-            RepoConnectionEvent(device, RepoConnectionStatus.disconnected),
-          );
-          logRepository.addLog(
-            BleLogEntry.system(
-              deviceId: device.deviceId,
-              deviceName: device.name,
-              message: 'Disconnected from "${device.name ?? device.deviceId}"',
-            ),
-          );
-        }
-      });
-
-      _connectionStateController.add(
-        RepoConnectionEvent(device, RepoConnectionStatus.connected),
-      );
+      // Wait for _globalConnectionSub to handle the confirmation and logs
     } catch (e) {
+      _connectingDevices.remove(device.deviceId);
       await logRepository.addLog(
         BleLogEntry.system(
           deviceId: device.deviceId,
@@ -268,20 +246,7 @@ class BleRepository {
     if (!_connectedDevices.containsKey(device.deviceId)) return;
     try {
       await ble.disconnect(device);
-      _connectionSubs[device.deviceId]?.cancel();
-      _connectionSubs.remove(device.deviceId);
-      _connectedDevices.remove(device.deviceId);
-      _connectionStateController.add(
-        RepoConnectionEvent(device, RepoConnectionStatus.disconnected),
-      );
-
-      await logRepository.addLog(
-        BleLogEntry.system(
-          deviceId: device.deviceId,
-          deviceName: device.name,
-          message: 'Disconnected (user initiated)',
-        ),
-      );
+      // Wait for _globalConnectionSub to handle the confirmation and logs
     } catch (e) {
       _errorController.add(e.toString());
     }
@@ -483,9 +448,7 @@ class BleRepository {
   void dispose() {
     _globalConnectionSub?.cancel();
     _scanSub?.cancel();
-    for (final sub in _connectionSubs.values) {
-      sub.cancel();
-    }
+
     for (final sub in _notifySubs.values) {
       sub.cancel();
     }

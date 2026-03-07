@@ -132,8 +132,17 @@ class _BleTaskHandler extends TaskHandler {
         await _log(
           device.deviceId,
           device.name,
-          '[BG] Paired device in range — auto-connecting…',
+          '[BG] Paired device in range — auto-connecting natively…',
         );
+
+        // Stabilize Android BLE Stack to mitigate GATT 133 Error
+        await Future.delayed(const Duration(milliseconds: 800));
+
+        // Re-check just in case we successfully connected via another isolate during the delay
+        if (_connected.contains(device.deviceId)) {
+          _connecting.remove(device.deviceId);
+          return;
+        }
 
         try {
           await UniversalBle.connect(device.deviceId);
