@@ -2,23 +2,21 @@ import 'dart:async';
 
 import 'package:bloc/bloc.dart';
 import 'package:bluetooth/models/ble_log_entry.dart';
-import 'package:bluetooth/repositories/ble_log_repository.dart';
 import 'package:bluetooth/repositories/ble_repository.dart';
+import 'package:bluetooth/services/ble_logger.dart';
 import 'package:equatable/equatable.dart';
 import 'package:universal_ble/universal_ble.dart';
 
 part 'bluetooth_state.dart';
 
 /// A lightweight proxy that manages BLE states for the UI
-/// by consuming BleRepository and BleLogRepository.
+/// by consuming BleRepository and BleLogger.
 class BluetoothCubit extends Cubit<BluetoothState> {
   final BleRepository bleRepository;
-  final BleLogRepository logRepository;
 
   late final List<StreamSubscription> _subscriptions;
 
-  BluetoothCubit({required this.bleRepository, required this.logRepository})
-    : super(BluetoothLoading()) {
+  BluetoothCubit({required this.bleRepository}) : super(BluetoothLoading()) {
     _subscriptions = [
       bleRepository.onPairedDevicesChanged.listen((pairedIds) {
         emit(
@@ -55,13 +53,14 @@ class BluetoothCubit extends Cubit<BluetoothState> {
           ),
         );
       }),
-      logRepository.onLogsUpdated.listen((deviceId) {
+      BleLogger.onLogsUpdated.listen((deviceId) {
         if (deviceId == 'all') {
-          emit(BluetoothLogsUpdated('all', logRepository.allLogs));
+          emit(BluetoothLogsUpdated('all', BleLogger.allLogs));
         } else {
-          emit(
-            BluetoothLogsUpdated(deviceId, logRepository.deviceLogs(deviceId)),
-          );
+          final deviceLogs = BleLogger.allLogs
+              .where((l) => l.deviceId == deviceId)
+              .toList();
+          emit(BluetoothLogsUpdated(deviceId, deviceLogs));
         }
       }),
     ];
@@ -72,7 +71,7 @@ class BluetoothCubit extends Cubit<BluetoothState> {
   Set<String> get pairedDeviceIds => bleRepository.pairedDeviceIds;
   List<BleDevice> get discoveredDevices => bleRepository.discoveredDevices;
   Map<String, BleDevice> get connectedDevices => bleRepository.connectedDevices;
-  List<BleLogEntry> get allLogs => logRepository.allLogs;
+  List<BleLogEntry> get allLogs => BleLogger.allLogs;
 
   // ── OPERATIONS ──────────────────────────────────────────────
 
@@ -81,10 +80,9 @@ class BluetoothCubit extends Cubit<BluetoothState> {
     await bleRepository.initialize();
   }
 
-  Future<void> loadDeviceLogs(String deviceId) =>
-      logRepository.loadDeviceLogs(deviceId);
+  Future<void> loadDeviceLogs(String deviceId) async {}
 
-  Future<void> loadAllLogs() => logRepository.loadAllLogs();
+  Future<void> loadAllLogs() async {}
 
   Future<void> startScan({List<String> withServices = const []}) async {
     await bleRepository.startScan(withServices: withServices);

@@ -1,7 +1,7 @@
 import 'dart:io';
 
 import 'package:bluetooth/models/ble_log_entry.dart';
-import 'package:bluetooth/storage/log_storage.dart';
+import 'package:bluetooth/services/ble_logger.dart';
 import 'package:bluetooth/storage/pairing_storage.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
@@ -208,7 +208,7 @@ class _BleTaskHandler extends TaskHandler {
         deviceName: deviceName,
         message: message,
       );
-      await LogStorage.appendLog(entry);
+      await BleLogger.addLog(entry);
     } catch (e) {
       debugPrint('[BleTask] log error: $e');
     }

@@ -1,10 +1,9 @@
 import 'dart:async';
 
 import 'package:bluetooth/bluetooth_service.dart';
-import 'package:bluetooth/models/ble_log_entry.dart';
-import 'package:bluetooth/repositories/ble_log_repository.dart';
 import 'package:bluetooth/services/background_service_bridge.dart';
 import 'package:bluetooth/storage/pairing_storage.dart';
+import 'package:bluetooth/utils/ble_device_logger.dart';
 import 'package:flutter/foundation.dart';
 import 'package:universal_ble/universal_ble.dart';
 
@@ -25,9 +24,8 @@ class RepoPairingEvent {
 
 class BleRepository {
   final BluetoothService ble = BluetoothService();
-  final BleLogRepository logRepository;
 
-  BleRepository({required this.logRepository});
+  BleRepository();
 
   // ── STATE EXPOSURE ──────────────────────────────────────────
 
@@ -100,16 +98,9 @@ class BleRepository {
             RepoConnectionEvent(dev, RepoConnectionStatus.connected),
           );
 
-          await logRepository.addLog(
-            BleLogEntry.system(
-              deviceId: event.deviceId,
-              deviceName: knownName,
-              message:
-                  'Connected to "${knownName ?? event.deviceId}"${event.error != null ? " (${event.error})" : ""}',
-            ),
-          );
+          await dev.log(LogEvent.connected, event.error);
 
-          await logRepository.loadDeviceLogs(event.deviceId);
+          // Logs natively handled
         } else {
           _connectingDevices.remove(event.deviceId);
           final dev = BleDevice(deviceId: event.deviceId, name: knownName);
@@ -118,15 +109,7 @@ class BleRepository {
             RepoConnectionEvent(dev, RepoConnectionStatus.disconnected),
           );
 
-          await logRepository.addLog(
-            BleLogEntry.system(
-              deviceId: event.deviceId,
-              deviceName: knownName,
-              message: event.error != null
-                  ? 'Disconnected from "${knownName ?? event.deviceId}" — ${event.error}'
-                  : 'Disconnected from "${knownName ?? event.deviceId}"',
-            ),
-          );
+          await dev.log(LogEvent.disconnected, event.error);
         }
       });
 
@@ -162,13 +145,8 @@ class BleRepository {
         if (!exists) {
           _discoveredDevices.add(device);
           _scanStateController.add(null);
-          logRepository.addLog(
-            BleLogEntry.system(
-              deviceId: device.deviceId,
-              deviceName: device.name,
-              message:
-                  'Discovered: "${device.name ?? "Unknown"}"${device.rssi != null ? " — RSSI ${device.rssi} dBm" : ""}',
-            ),
+          device.logCustom(
+            'Discovered: "${device.name ?? "Unknown"}"${device.rssi != null ? " — RSSI ${device.rssi} dBm" : ""}',
           );
         }
 
@@ -219,25 +197,13 @@ class BleRepository {
     _connectionStateController.add(
       RepoConnectionEvent(device, RepoConnectionStatus.connecting),
     );
-    await logRepository.addLog(
-      BleLogEntry.system(
-        deviceId: device.deviceId,
-        deviceName: device.name,
-        message: 'Connecting to "${device.name ?? device.deviceId}"…',
-      ),
-    );
+    await device.log(LogEvent.connecting);
     try {
       await ble.connect(device);
       // Wait for _globalConnectionSub to handle the confirmation and logs
     } catch (e) {
       _connectingDevices.remove(device.deviceId);
-      await logRepository.addLog(
-        BleLogEntry.system(
-          deviceId: device.deviceId,
-          deviceName: device.name,
-          message: 'Connection failed: $e',
-        ),
-      );
+      await device.log(LogEvent.connectionFailed, e.toString());
       _errorController.add(e.toString());
     }
   }
@@ -256,13 +222,8 @@ class BleRepository {
   Future<void> discoverServices(BleDevice device) async {
     try {
       final services = await ble.discoverServices(device);
-      await logRepository.addLog(
-        BleLogEntry.system(
-          deviceId: device.deviceId,
-          deviceName: device.name,
-          message:
-              'Discovered ${services.length} service(s): ${services.map((s) => s.uuid).join(", ")}',
-        ),
+      await device.logCustom(
+        'Discovered ${services.length} service(s): ${services.map((s) => s.uuid).join(", ")}',
       );
     } catch (e) {
       _errorController.add(e.toString());
@@ -277,13 +238,10 @@ class BleRepository {
     try {
       await ble.read(characteristic);
       if (deviceId != null) {
-        await logRepository.addLog(
-          BleLogEntry.system(
-            deviceId: deviceId,
-            deviceName: deviceName,
-            message: 'Read from ${characteristic.uuid}',
-          ),
-        );
+        await BleDevice(
+          deviceId: deviceId,
+          name: deviceName,
+        ).logCustom('Read from ${characteristic.uuid}');
       }
     } catch (e) {
       _errorController.add(e.toString());
@@ -300,13 +258,8 @@ class BleRepository {
     try {
       await ble.write(characteristic, data, withResponse: withResponse);
       if (deviceId != null) {
-        await logRepository.addLog(
-          BleLogEntry.system(
-            deviceId: deviceId,
-            deviceName: deviceName,
-            message:
-                'Write${withResponse ? " (with response)" : " (no response)"} to ${characteristic.uuid}',
-          ),
+        await BleDevice(deviceId: deviceId, name: deviceName).logCustom(
+          'Write${withResponse ? " (with response)" : " (no response)"} to ${characteristic.uuid}',
         );
       }
     } catch (e) {
@@ -339,13 +292,8 @@ class BleRepository {
         );
       }
       if (deviceId != null) {
-        await logRepository.addLog(
-          BleLogEntry.system(
-            deviceId: deviceId,
-            deviceName: deviceName,
-            message:
-                'Subscribed to ${useIndications ? "indications" : "notifications"} on ${characteristic.uuid}',
-          ),
+        await BleDevice(deviceId: deviceId, name: deviceName).logCustom(
+          'Subscribed to ${useIndications ? "indications" : "notifications"} on ${characteristic.uuid}',
         );
       }
     } catch (e) {
@@ -370,24 +318,12 @@ class BleRepository {
     BleCommand? pairingCommand,
   }) async {
     _pairingEventController.add(RepoPairingEvent(device.deviceId, true));
-    await logRepository.addLog(
-      BleLogEntry.system(
-        deviceId: device.deviceId,
-        deviceName: device.name,
-        message: 'Pairing requested with "${device.name ?? device.deviceId}"…',
-      ),
-    );
+    await device.log(LogEvent.pairingRequested);
     try {
       await ble.pair(device, pairingCommand: pairingCommand);
       await PairingStorage.savePaired(device.deviceId);
       _pairedDeviceIds = await PairingStorage.loadPairedIds();
-      await logRepository.addLog(
-        BleLogEntry.system(
-          deviceId: device.deviceId,
-          deviceName: device.name,
-          message: 'Paired successfully & saved to storage',
-        ),
-      );
+      await device.log(LogEvent.paired);
       await BackgroundServiceBridge.start();
       _pairedDevicesController.add(Set.unmodifiable(_pairedDeviceIds));
       _pairingEventController.add(
@@ -395,37 +331,19 @@ class BleRepository {
       );
       connect(device);
     } catch (e) {
-      await logRepository.addLog(
-        BleLogEntry.system(
-          deviceId: device.deviceId,
-          deviceName: device.name,
-          message: 'Pair failed: $e',
-        ),
-      );
+      await device.log(LogEvent.pairFailed, e.toString());
       _errorController.add(e.toString());
     }
   }
 
   Future<void> unpairDevice(BleDevice device) async {
     _pairingEventController.add(RepoPairingEvent(device.deviceId, true));
-    await logRepository.addLog(
-      BleLogEntry.system(
-        deviceId: device.deviceId,
-        deviceName: device.name,
-        message: 'Unpair requested for "${device.name ?? device.deviceId}"…',
-      ),
-    );
+    await device.log(LogEvent.unpairingRequested);
     try {
       await ble.unpair(device);
       await PairingStorage.removePaired(device.deviceId);
       _pairedDeviceIds = await PairingStorage.loadPairedIds();
-      await logRepository.addLog(
-        BleLogEntry.system(
-          deviceId: device.deviceId,
-          deviceName: device.name,
-          message: 'Unpaired & removed from storage',
-        ),
-      );
+      await device.log(LogEvent.unpaired);
       if (_pairedDeviceIds.isEmpty) {
         await BackgroundServiceBridge.stop();
       }
@@ -434,13 +352,7 @@ class BleRepository {
         RepoPairingEvent(device.deviceId, false, isPaired: false),
       );
     } catch (e) {
-      await logRepository.addLog(
-        BleLogEntry.system(
-          deviceId: device.deviceId,
-          deviceName: device.name,
-          message: 'Unpair failed: $e',
-        ),
-      );
+      await device.log(LogEvent.unpairFailed, e.toString());
       _errorController.add(e.toString());
     }
   }
