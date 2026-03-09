@@ -1,5 +1,4 @@
 import 'package:bluetooth/cubit/bluetooth_cubit.dart';
-import 'package:bluetooth/screens/device_log_screen.dart';
 import 'package:bluetooth/widgets/device_detail_sheet.dart';
 import 'package:bluetooth/widgets/rssi_chip.dart';
 import 'package:flutter/material.dart';
@@ -15,55 +14,12 @@ class ScannerScreen extends StatelessWidget {
     final cubit = context.read<BluetoothCubit>();
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('BLE Scanner'),
-        actions: [
-          // LMNP filter enforced automatically.
-        ],
-        bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(28),
-          child: BlocBuilder<BluetoothCubit, BluetoothState>(
-            builder: (context, state) {
-              final (label, color) = switch (state) {
-                BluetoothInitialized(:final availabilityState) => (
-                  'BLE: ${availabilityState.name}',
-                  Colors.green,
-                ),
-                BluetoothAvailabilityChanged(:final availabilityState) => (
-                  'BLE: ${availabilityState.name}',
-                  Colors.orange,
-                ),
-                BluetoothScanning() => ('Scanning…', Colors.blue),
-                BluetoothScanStopped() => ('Scan stopped', Colors.grey),
-                BluetoothError(:final message) => (
-                  'Error: $message',
-                  Colors.red,
-                ),
-                _ => ('Initialising…', Colors.grey),
-              };
-              return Container(
-                width: double.infinity,
-                color: color.withValues(alpha: 0.15),
-                padding: const EdgeInsets.symmetric(
-                  vertical: 4,
-                  horizontal: 16,
-                ),
-                child: Text(
-                  label,
-                  style: TextStyle(color: color, fontWeight: FontWeight.w600),
-                ),
-              );
-            },
-          ),
-        ),
-      ),
+      appBar: AppBar(title: const Text('BLE Scanner')),
 
       // ── Device list ──────────────────────────────────────────
       body: BlocBuilder<BluetoothCubit, BluetoothState>(
         builder: (context, state) {
-          final List<BleDevice> devices = cubit.discoveredDevices
-              .where((d) => d.name?.startsWith('LMNP') == true)
-              .toList();
+          final List<BleDevice> devices = cubit.discoveredDevices;
 
           if (state is BluetoothLoading) {
             return const Center(child: CircularProgressIndicator());
@@ -81,7 +37,7 @@ class ScannerScreen extends StatelessWidget {
                   ),
                   const SizedBox(height: 16),
                   Text(
-                    state is BluetoothScanning
+                    state is BluetoothScanState && state.isScanning
                         ? 'Looking for devices…'
                         : 'Press ▶ to start scanning',
                     style: const TextStyle(fontSize: 16, color: Colors.grey),
@@ -102,115 +58,178 @@ class ScannerScreen extends StatelessWidget {
                   : 'Unknown Device';
               final rssi = device.rssi;
               final isPaired = cubit.pairedDeviceIds.contains(device.deviceId);
-              final isConnected =
-                  cubit.connectedDevices.containsKey(device.deviceId);
+              final isConnected = cubit.connectedDevices.containsKey(
+                device.deviceId,
+              );
 
-              return ListTile(
-                leading: CircleAvatar(
-                  backgroundColor: isConnected
-                      ? Colors.blue.shade50
-                      : isPaired
-                      ? Colors.green.shade50
-                      : Colors.deepPurple.shade50,
-                  child: Icon(
-                    Icons.bluetooth,
-                    color: isConnected
-                        ? Colors.blue
-                        : isPaired
-                        ? Colors.green
-                        : Colors.deepPurple,
+              return InkWell(
+                onTap: () => showModalBottomSheet(
+                  context: context,
+                  isScrollControlled: true,
+                  shape: const RoundedRectangleBorder(
+                    borderRadius: BorderRadius.vertical(
+                      top: Radius.circular(20),
+                    ),
+                  ),
+                  builder: (_) => BlocProvider.value(
+                    value: cubit,
+                    child: DeviceDetailSheet(device: device),
                   ),
                 ),
-                title: Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        name,
-                        style: const TextStyle(fontWeight: FontWeight.w600),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16.0,
+                    vertical: 12.0,
+                  ),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      CircleAvatar(
+                        radius: 24,
+                        backgroundColor: isConnected
+                            ? Colors.blue.shade50
+                            : isPaired
+                            ? Colors.green.shade50
+                            : Colors.deepPurple.shade50,
+                        child: Icon(
+                          Icons.bluetooth,
+                          color: isConnected
+                              ? Colors.blue
+                              : isPaired
+                              ? Colors.green
+                              : Colors.deepPurple,
+                        ),
                       ),
-                    ),
-                    if (isPaired && !isConnected)
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 6,
-                          vertical: 2,
+                      const SizedBox(width: 16),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              name,
+                              style: const TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w600,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              device.deviceId,
+                              style: TextStyle(
+                                fontSize: 13,
+                                color: Colors.grey.shade600,
+                                fontFamily: 'monospace',
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            const SizedBox(height: 8),
+                            Wrap(
+                              spacing: 8,
+                              runSpacing: 4,
+                              crossAxisAlignment: WrapCrossAlignment.center,
+                              children: [
+                                if (rssi != null) RssiChip(rssi: rssi),
+                                if (isPaired && !isConnected)
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 6,
+                                      vertical: 2,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: Colors.green.shade50,
+                                      border: Border.all(
+                                        color: Colors.green.shade300,
+                                      ),
+                                      borderRadius: BorderRadius.circular(10),
+                                    ),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(
+                                          Icons.check_circle_outline,
+                                          size: 14,
+                                          color: Colors.green.shade700,
+                                        ),
+                                        const SizedBox(width: 4),
+                                        Text(
+                                          'Paired',
+                                          style: TextStyle(
+                                            fontSize: 11,
+                                            color: Colors.green.shade700,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                if (isConnected)
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 6,
+                                      vertical: 2,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: Colors.blue.shade50,
+                                      border: Border.all(
+                                        color: Colors.blue.shade300,
+                                      ),
+                                      borderRadius: BorderRadius.circular(10),
+                                    ),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(
+                                          Icons.bluetooth_connected,
+                                          size: 14,
+                                          color: Colors.blue.shade700,
+                                        ),
+                                        const SizedBox(width: 4),
+                                        Text(
+                                          'Connected',
+                                          style: TextStyle(
+                                            fontSize: 11,
+                                            color: Colors.blue.shade700,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ],
                         ),
-                        decoration: BoxDecoration(
-                          color: Colors.green.shade50,
-                          border: Border.all(color: Colors.green.shade300),
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                        child: Text(
-                          'Paired ✓',
-                          style: TextStyle(
-                            fontSize: 11,
-                            color: Colors.green.shade700,
-                            fontWeight: FontWeight.w600,
+                      ),
+                      const SizedBox(width: 12),
+                      Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          IconButton(
+                            icon: Icon(
+                              Icons.info_outline,
+                              color: Colors.grey.shade400,
+                            ),
+                            tooltip: 'Device info',
+                            onPressed: () => showModalBottomSheet(
+                              context: context,
+                              isScrollControlled: true,
+                              shape: const RoundedRectangleBorder(
+                                borderRadius: BorderRadius.vertical(
+                                  top: Radius.circular(20),
+                                ),
+                              ),
+                              builder: (_) => BlocProvider.value(
+                                value: cubit,
+                                child: DeviceDetailSheet(device: device),
+                              ),
+                            ),
                           ),
-                        ),
+                        ],
                       ),
-                    if (isConnected)
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 6,
-                          vertical: 2,
-                        ),
-                        decoration: BoxDecoration(
-                          color: Colors.blue.shade50,
-                          border: Border.all(color: Colors.blue.shade300),
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                        child: Text(
-                          'Connected ✓',
-                          style: TextStyle(
-                            fontSize: 11,
-                            color: Colors.blue.shade700,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ),
-                  ],
-                ),
-                subtitle: Text(
-                  device.deviceId,
-                  style: const TextStyle(fontSize: 12),
-                ),
-                trailing: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    if (rssi != null) RssiChip(rssi: rssi),
-                    const SizedBox(width: 4),
-                    IconButton(
-                      icon: Icon(
-                        Icons.info_outline,
-                        size: 20,
-                        color: Colors.grey.shade400,
-                      ),
-                      tooltip: 'Device info',
-                      onPressed: () => showModalBottomSheet(
-                        context: context,
-                        isScrollControlled: true,
-                        shape: const RoundedRectangleBorder(
-                          borderRadius: BorderRadius.vertical(
-                            top: Radius.circular(20),
-                          ),
-                        ),
-                        builder: (_) => BlocProvider.value(
-                          value: cubit,
-                          child: DeviceDetailSheet(device: device),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                // Tap → full log screen
-                onTap: () => Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => BlocProvider.value(
-                      value: cubit,
-                      child: DeviceLogScreen(device: device),
-                    ),
+                    ],
                   ),
                 ),
               );
@@ -222,7 +241,7 @@ class ScannerScreen extends StatelessWidget {
       // ── Scan FAB ─────────────────────────────────────────────
       floatingActionButton: BlocBuilder<BluetoothCubit, BluetoothState>(
         builder: (context, state) {
-          final isScanning = state is BluetoothScanning;
+          final isScanning = state is BluetoothScanState && state.isScanning;
           return FloatingActionButton.extended(
             onPressed: () {
               if (isScanning) {

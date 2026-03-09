@@ -14,8 +14,6 @@ class AllLogsScreen extends StatefulWidget {
 class _AllLogsScreenState extends State<AllLogsScreen> {
   late final BluetoothCubit _cubit;
   final ScrollController _scrollCtrl = ScrollController();
-  LogFilterType _filter = LogFilterType.all;
-  bool _autoScroll = true;
   String? _selectedDeviceId;
 
   @override
@@ -32,46 +30,29 @@ class _AllLogsScreenState extends State<AllLogsScreen> {
   }
 
   void _scrollToBottom() {
-    if (_autoScroll && _scrollCtrl.hasClients) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_scrollCtrl.hasClients) {
-          _scrollCtrl.animateTo(
-            _scrollCtrl.position.maxScrollExtent,
-            duration: const Duration(milliseconds: 250),
-            curve: Curves.easeOut,
-          );
-        }
-      });
-    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollCtrl.hasClients) {
+        _scrollCtrl.animateTo(
+          _scrollCtrl.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 250),
+          curve: Curves.easeOut,
+        );
+      }
+    });
   }
 
   List<BleLogEntry> _applyFilter(List<BleLogEntry> logs) {
-    var filtered = logs;
-
-    // 1. Only show logs for devices starting with LMNP
-    filtered = filtered
+    var filtered = logs
         .where((e) => e.deviceName?.startsWith('LMNP') == true)
         .toList();
 
-    // 2. Filter by specific device if selected
     if (_selectedDeviceId != null) {
       filtered = filtered
           .where((e) => e.deviceId == _selectedDeviceId)
           .toList();
     }
 
-    // 2. Filter by log type
-    return switch (_filter) {
-      LogFilterType.all => filtered,
-      LogFilterType.incoming =>
-        filtered.where((e) => e.direction == LogDirection.incoming).toList(),
-      LogFilterType.outgoing =>
-        filtered.where((e) => e.direction == LogDirection.outgoing).toList(),
-      LogFilterType.system =>
-        filtered.where((e) => e.direction == LogDirection.system).toList(),
-      LogFilterType.errors =>
-        filtered.where((e) => e.type == LogType.error).toList(),
-    };
+    return filtered;
   }
 
   @override
@@ -84,39 +65,12 @@ class _AllLogsScreenState extends State<AllLogsScreen> {
         title: const Text(
           'All Global Logs',
           style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-        )
-        // ,
-        // actions: [
-        //   // Filter toggle removed logic
-        //   IconButton(
-        //     tooltip: _autoScroll ? 'Auto-scroll ON' : 'Auto-scroll OFF',
-        //     onPressed: () => setState(() => _autoScroll = !_autoScroll),
-        //     icon: Icon(
-        //       _autoScroll ? Icons.vertical_align_bottom : Icons.pause,
-        //       color: _autoScroll ? Colors.greenAccent : Colors.grey,
-        //     ),
-        //   ),
-        //   IconButton(
-        //     tooltip: 'Clear view',
-        //     onPressed: () => setState(() {
-        //       // Doing this clear might be confusing globally; a better option
-        //       // might be just visual clearing or redirect to Device Log to clear.
-        //       ScaffoldMessenger.of(context).showSnackBar(
-        //         const SnackBar(
-        //           content: Text(
-        //             'Global log clear not supported, clear individually via Device info.',
-        //           ),
-        //         ),
-        //       );
-        //     }),
-        //     icon: const Icon(Icons.delete_outline, color: Colors.grey),
-        //   ),
-        // ],
+        ),
       ),
 
       body: Column(
         children: [
-          // ── Device filter dropdown & Filter bar ──
+          // ── Device filter dropdown ──
           Container(
             color: const Color(0xFF161B22),
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -132,7 +86,6 @@ class _AllLogsScreenState extends State<AllLogsScreen> {
                     buildWhen: (_, curr) => curr is BluetoothLogsUpdated,
                     builder: (context, _) {
                       final logs = _cubit.allLogs;
-                      // Extract unique device IDs & names
                       final deviceMap = <String, String>{};
                       for (final log in logs) {
                         if (log.deviceName?.startsWith('LMNP') == true) {
@@ -179,10 +132,6 @@ class _AllLogsScreenState extends State<AllLogsScreen> {
                 ),
               ],
             ),
-          ),
-          LogFilterBar(
-            current: _filter,
-            onChanged: (f) => setState(() => _filter = f),
           ),
 
           // ── Log list ──
@@ -238,32 +187,6 @@ class _AllLogsScreenState extends State<AllLogsScreen> {
             ),
           ),
         ],
-      ),
-
-      floatingActionButton: BlocBuilder<BluetoothCubit, BluetoothState>(
-        buildWhen: (_, curr) =>
-            curr is BluetoothLogsUpdated && curr.deviceId == 'all',
-        builder: (context, _) {
-          final count = _applyFilter(_cubit.allLogs).length;
-          return FloatingActionButton.small(
-            onPressed: () {
-              setState(() => _autoScroll = true);
-              _scrollToBottom();
-            },
-            backgroundColor: Colors.deepPurple,
-            tooltip: 'Jump to latest',
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                const Icon(Icons.arrow_downward, size: 14, color: Colors.white),
-                Text(
-                  '$count',
-                  style: const TextStyle(fontSize: 9, color: Colors.white70),
-                ),
-              ],
-            ),
-          );
-        },
       ),
     );
   }

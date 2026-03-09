@@ -19,8 +19,6 @@ class AppPermissions {
     final permissions = <Permission>[
       Permission.bluetoothScan,
       Permission.bluetoothConnect,
-      // Android 13+: needed to show the foreground-service notification
-      Permission.notification,
     ];
 
     final statuses = await permissions.request();

@@ -2,77 +2,6 @@ import 'package:bluetooth/models/ble_log_entry.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-/// Enum for the log list filter state.
-enum LogFilterType { all, incoming, outgoing, system, errors }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// LogFilterBar
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Horizontal scrollable filter chip bar for the log screen.
-class LogFilterBar extends StatelessWidget {
-  const LogFilterBar({
-    super.key,
-    required this.current,
-    required this.onChanged,
-  });
-
-  final LogFilterType current;
-  final ValueChanged<LogFilterType> onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      color: const Color(0xFF161B22),
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: Row(
-          children: [
-            _chip('All', LogFilterType.all, Icons.list),
-            _chip('In', LogFilterType.incoming, Icons.arrow_downward),
-            _chip('Out', LogFilterType.outgoing, Icons.arrow_upward),
-            _chip('System', LogFilterType.system, Icons.settings),
-            _chip('Errors', LogFilterType.errors, Icons.error_outline),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _chip(String label, LogFilterType type, IconData icon) {
-    final selected = current == type;
-    return Padding(
-      padding: const EdgeInsets.only(right: 6),
-      child: FilterChip(
-        label: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 13, color: selected ? Colors.white : Colors.grey),
-            const SizedBox(width: 4),
-            Text(
-              label,
-              style: TextStyle(
-                fontSize: 12,
-                color: selected ? Colors.white : Colors.grey,
-              ),
-            ),
-          ],
-        ),
-        selected: selected,
-        onSelected: (_) => onChanged(type),
-        backgroundColor: const Color(0xFF21262D),
-        selectedColor: Colors.deepPurple,
-        checkmarkColor: Colors.transparent,
-        side: BorderSide(
-          color: selected ? Colors.deepPurple : Colors.grey.shade800,
-        ),
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-      ),
-    );
-  }
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // LogTile — a single log entry row
 // ─────────────────────────────────────────────────────────────────────────────
@@ -93,24 +22,10 @@ class _LogTileState extends State<LogTile> {
     final e = widget.entry;
     final hasData = e.hexData != null;
 
-    final (dirColor, dirIcon) = switch (e.direction) {
-      LogDirection.incoming => (const Color(0xFF00B4D8), Icons.arrow_downward),
-      LogDirection.outgoing => (const Color(0xFF2DC653), Icons.arrow_upward),
-      LogDirection.system => (const Color(0xFFB0B8C1), Icons.circle),
-    };
-
-    final typeColor = switch (e.type) {
-      LogType.error => Colors.red.shade400,
-      LogType.pair || LogType.unpair => Colors.amber.shade400,
-      LogType.connect => Colors.greenAccent,
-      LogType.disconnect => Colors.orange,
-      _ => Colors.grey.shade500,
-    };
-
     return GestureDetector(
       onLongPress: () {
         final text =
-            '[${e.timeLabel}] [${e.directionLabel}] [${e.typeLabel}] ${e.message}'
+            '[${e.timeLabel}] ${e.message}'
             '${e.hexData != null ? '\nHEX: ${e.hexData}' : ''}'
             '${e.asciiData != null ? '\nASCII: ${e.asciiData}' : ''}';
         Clipboard.setData(ClipboardData(text: text));
@@ -127,11 +42,7 @@ class _LogTileState extends State<LogTile> {
         decoration: BoxDecoration(
           color: const Color(0xFF161B22),
           borderRadius: BorderRadius.circular(6),
-          border: Border.all(
-            color: e.type == LogType.error
-                ? Colors.red.shade800
-                : Colors.transparent,
-          ),
+          border: Border.all(color: Colors.transparent),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -150,22 +61,20 @@ class _LogTileState extends State<LogTile> {
                     ),
                   ),
                   const SizedBox(width: 8),
-                  Icon(dirIcon, size: 12, color: dirColor),
-                  const SizedBox(width: 4),
                   Container(
                     padding: const EdgeInsets.symmetric(
                       horizontal: 5,
                       vertical: 1,
                     ),
                     decoration: BoxDecoration(
-                      color: typeColor.withValues(alpha: 0.15),
+                      color: Colors.grey.withValues(alpha: 0.15),
                       borderRadius: BorderRadius.circular(3),
                     ),
-                    child: Text(
-                      e.typeLabel,
+                    child: const Text(
+                      'LOG',
                       style: TextStyle(
                         fontSize: 9,
-                        color: typeColor,
+                        color: Colors.grey,
                         fontWeight: FontWeight.bold,
                         letterSpacing: 0.5,
                       ),
@@ -175,11 +84,9 @@ class _LogTileState extends State<LogTile> {
                   Expanded(
                     child: Text(
                       e.message,
-                      style: TextStyle(
+                      style: const TextStyle(
                         fontSize: 12,
-                        color: e.type == LogType.error
-                            ? Colors.red.shade300
-                            : Colors.white70,
+                        color: Colors.white70,
                       ),
                     ),
                   ),
@@ -205,7 +112,7 @@ class _LogTileState extends State<LogTile> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     const Divider(color: Color(0xFF30363D), height: 8),
-                    _dataRow('HEX', e.hexData!, dirColor),
+                    _dataRow('HEX', e.hexData!, Colors.grey),
                     if (e.asciiData != null)
                       _dataRow('ASCII', e.asciiData!, Colors.grey.shade400),
                   ],

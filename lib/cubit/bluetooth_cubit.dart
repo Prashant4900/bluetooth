@@ -1,680 +1,168 @@
 import 'dart:async';
 
 import 'package:bloc/bloc.dart';
-import 'package:bluetooth/bluetooth_service.dart';
 import 'package:bluetooth/models/ble_log_entry.dart';
-import 'package:bluetooth/services/background_service_bridge.dart';
-import 'package:bluetooth/services/notification_service.dart';
-import 'package:bluetooth/storage/log_storage.dart';
-import 'package:bluetooth/storage/pairing_storage.dart';
+import 'package:bluetooth/repositories/ble_log_repository.dart';
+import 'package:bluetooth/repositories/ble_repository.dart';
 import 'package:equatable/equatable.dart';
-import 'package:flutter/foundation.dart';
 import 'package:universal_ble/universal_ble.dart';
 
 part 'bluetooth_state.dart';
 
+/// A lightweight proxy that manages BLE states for the UI
+/// by consuming BleRepository and BleLogRepository.
 class BluetoothCubit extends Cubit<BluetoothState> {
-  BluetoothCubit() : super(BluetoothInitial());
+  final BleRepository bleRepository;
+  final BleLogRepository logRepository;
 
-  final BluetoothService _ble = BluetoothService();
+  late final List<StreamSubscription> _subscriptions;
 
-  // In-memory cache of paired device IDs (mirrored from SharedPreferences)
-  Set<String> _pairedDeviceIds = {};
-
-  /// Convenience getter for the UI.
-  Set<String> get pairedDeviceIds => Set.unmodifiable(_pairedDeviceIds);
-
-  // In-memory log buffer per device
-  final Map<String, List<BleLogEntry>> _deviceLogs = {};
-
-
-  /// Return in-memory logs for [deviceId] (empty list if none yet).
-  List<BleLogEntry> logsFor(String deviceId) =>
-      List.unmodifiable(_deviceLogs[deviceId] ?? []);
-
-  // ══════════════════════════════════════════════
-  // SECTION 1 – INITIALIZE
-  // ══════════════════════════════════════════════
-
-  StreamSubscription<AvailabilityState>? _availabilitySub;
-  StreamSubscription<BleConnectionEvent>? _globalConnectionSub;
-
-  /// Initialise BLE stack and start listening for availability changes.
-  Future<void> initialize() async {
-    emit(BluetoothLoading());
-    try {
-      // Clean up any scan left over from a previous session / hot restart
-      await _ble.stopScanIfActive();
-
-      final availState = await _ble.initialize();
-
-      // Keep listening for future availability changes.
-      _availabilitySub?.cancel();
-      _availabilitySub = _ble.availabilityStream.listen((state) {
-        emit(BluetoothAvailabilityChanged(state));
-      });
-
-      // Load stored paired device IDs before emitting initialized.
-      await _loadPairedDevices();
-
-      // ── Global connection state listener ─────────────────────────
-      // Fires for ANY device: GATT devices we connect to explicitly
-      // AND system-paired devices (earbuds, headsets) that connect or
-      // disconnect on their own (e.g. opening/closing the case, picking
-      // up/ending a call).
-      _globalConnectionSub?.cancel();
-      _globalConnectionSub = _ble.connectionStateStream.listen((event) async {
-        final knownName = _discoveredDevices
-            .cast<BleDevice?>()
-            .firstWhere(
-              (d) => d?.deviceId == event.deviceId,
-              orElse: () => null,
-            )
-            ?.name;
-
-        if (event.isConnected) {
-          // Try to construct a BleDevice to update the state
-          final dev = BleDevice(deviceId: event.deviceId, name: knownName);
-          _connectedDevices[event.deviceId] = dev;
-
-          // ── FIX 1: ensure device appears in the scanner list ──────
-          // Background auto-connect happens in a separate isolate so the
-          // device is never added to _discoveredDevices via _scanSub.
-          // Without this, the scanner screen cannot show a "Connected" badge.
-          if (!_discoveredDevices.any((d) => d.deviceId == event.deviceId)) {
-            _discoveredDevices.add(dev);
-          }
-
-          emit(BluetoothConnected(dev));
-          // Refresh scanner list so the "Connected ✓" badge appears
-          emit(BluetoothScanResult(List.unmodifiable(_discoveredDevices)));
-
-          await _log(
-            BleLogEntry.system(
-              deviceId: event.deviceId,
-              deviceName: knownName,
-              type: LogType.connect,
-              message:
-                  'Connected to "${knownName ?? event.deviceId}"'
-                  '${event.error != null ? " (${event.error})" : ""}',
-            ),
-          );
-
-          // ── FIX 2: pull in background-written log entries ─────────
-          // The background isolate writes SCAN + CONNECT log entries
-          // directly to storage before sending this connectionChange event.
-          // loadDeviceLogs merges storage entries into the in-memory buffer
-          // then emits BluetoothLogsUpdated so the Logs screen refreshes
-          // live — without needing an app restart.
-          await loadDeviceLogs(event.deviceId);
-          emit(BluetoothLogsUpdated('all', allLogs));
-        } else {
-          final dev = BleDevice(deviceId: event.deviceId, name: knownName);
-          emit(BluetoothDisconnected(dev));
-
-          await _log(
-            BleLogEntry.system(
-              deviceId: event.deviceId,
-              deviceName: knownName,
-              type: LogType.disconnect,
-              message: event.error != null
-                  ? 'Disconnected from "${knownName ?? event.deviceId}" — ${event.error}'
-                  : 'Disconnected from "${knownName ?? event.deviceId}"',
-            ),
-          );
-          // Clear connected device if it matches
-          _connectedDevices.remove(event.deviceId);
-          // Refresh scanner so the "Connected" badge clears
-          emit(BluetoothScanResult(List.unmodifiable(_discoveredDevices)));
-          // Resume scanning to catch the device when it returns
-          startScan();
-        }
-      });
-      emit(BluetoothInitialized(availState));
-
-      // Auto-start scanning if BLE is already on
-      if (availState == AvailabilityState.poweredOn) {
-        await startScan();
-        // Also query devices already connected at the OS level
-        // (earbuds paired via system settings don't appear in scan).
-        await _checkSystemDevices();
-      }
-    } catch (e) {
-      emit(BluetoothError(e.toString()));
-    }
-  }
-
-  /// Query system-connected devices (paired via OS, not this app's scan).
-  /// Logs any that are in our paired list so the user sees the connection.
-  Future<void> _checkSystemDevices() async {
-    try {
-      final systemDevices = await _ble.getSystemDevices();
-      for (final device in systemDevices) {
-        // Add to discovered list so connection events can resolve the name
-        if (!_discoveredDevices.any((d) => d.deviceId == device.deviceId)) {
-          _discoveredDevices.add(device);
-        }
-        // Log the fact they are already connected
-        await _log(
-          BleLogEntry.system(
-            deviceId: device.deviceId,
-            deviceName: device.name,
-            type: LogType.connect,
-            message: 'Already connected (system/OS paired device)',
+  BluetoothCubit({required this.bleRepository, required this.logRepository})
+    : super(BluetoothLoading()) {
+    _subscriptions = [
+      bleRepository.onPairedDevicesChanged.listen((pairedIds) {
+        emit(
+          BluetoothPairingState(
+            pairedDeviceIds: pairedIds,
+            // Assuming changedDeviceId isn't strictly necessary here, or we get it from pairing events.
           ),
         );
-      }
-      if (systemDevices.isNotEmpty) {
-        emit(BluetoothScanResult(List.unmodifiable(_discoveredDevices)));
-      }
-    } catch (_) {
-      // Best-effort — ignore if unsupported
-    }
-  }
-
-  /// Load paired device IDs from SharedPreferences and update cache.
-  Future<void> _loadPairedDevices() async {
-    _pairedDeviceIds = await PairingStorage.loadPairedIds();
-    emit(BluetoothPairedDevicesLoaded(Set.unmodifiable(_pairedDeviceIds)));
-    debugPrint(
-      '[BLE] Loaded ${_pairedDeviceIds.length} stored paired device(s)',
-    );
-  }
-
-  // ══════════════════════════════════════════════
-  // SECTION 8 – LOGGING
-  // ══════════════════════════════════════════════
-
-  /// Core log helper: writes to memory, persists, and emits state.
-  Future<void> _log(BleLogEntry entry) async {
-    final list = _deviceLogs.putIfAbsent(entry.deviceId, () => []);
-    list.add(entry);
-    emit(BluetoothLogsUpdated(entry.deviceId, List.unmodifiable(list)));
-    // Also notify listeners watching 'all' logs
-    emit(BluetoothLogsUpdated('all', allLogs));
-    // Persist asynchronously (fire-and-forget; UI already updated)
-    LogStorage.appendLog(entry).ignore();
-  }
-
-  /// Load historical logs for [deviceId] from SharedPreferences into memory
-  /// and emit [BluetoothLogsUpdated].
-  Future<void> loadDeviceLogs(String deviceId) async {
-    final stored = await LogStorage.loadLogs(deviceId);
-    // Merge: stored first, then any in-memory newer entries
-    final inMem = _deviceLogs[deviceId] ?? [];
-    final merged = <BleLogEntry>[...stored];
-    for (final e in inMem) {
-      if (!merged.any((s) => s.id == e.id)) merged.add(e);
-    }
-    merged.sort((a, b) => a.timestamp.compareTo(b.timestamp));
-    _deviceLogs[deviceId] = merged;
-    emit(BluetoothLogsUpdated(deviceId, List.unmodifiable(merged)));
-  }
-
-  /// Load historical logs for all devices that have stored logs.
-  Future<void> loadAllLogs() async {
-    final deviceIds = await LogStorage.getDevicesWithLogs();
-
-    // Attempt to load logs for all devices that have storage entries
-    await Future.wait(deviceIds.map((id) => loadDeviceLogs(id)));
-
-    // We emit with a special 'all' ID to trigger UI updates for screens watching all logs
-    emit(BluetoothLogsUpdated('all', allLogs));
-  }
-
-  /// Get a single combined list of all logs across all devices, sorted chronologically.
-  List<BleLogEntry> get allLogs {
-    final all = <BleLogEntry>[];
-    for (final logs in _deviceLogs.values) {
-      all.addAll(logs);
-    }
-    all.sort((a, b) => a.timestamp.compareTo(b.timestamp));
-    return List.unmodifiable(all);
-  }
-
-  /// Clear in-memory and persisted logs for [deviceId].
-  Future<void> clearDeviceLogs(String deviceId) async {
-    _deviceLogs.remove(deviceId);
-    await LogStorage.clearLogs(deviceId);
-    emit(BluetoothLogsUpdated(deviceId, const []));
-    // Also notify listeners watching 'all' logs
-    emit(BluetoothLogsUpdated('all', allLogs));
-  }
-
-  // ══════════════════════════════════════════════
-  // SECTION 2 – SCANNING
-  // ══════════════════════════════════════════════
-
-  StreamSubscription<BleDevice>? _scanSub;
-  final List<BleDevice> _discoveredDevices = [];
-  List<BleDevice> get discoveredDevices =>
-      List.unmodifiable(_discoveredDevices);
-
-  /// Start scanning. Already-seen devices are de-duplicated by ID.
-  Future<void> startScan({List<String> withServices = const []}) async {
-    // Keep paired devices in the list so they remain visible in the UI
-    // even when disconnected. Only remove devices that have not been paired.
-    _discoveredDevices.removeWhere((d) => !_pairedDeviceIds.contains(d.deviceId));
-    emit(BluetoothScanning());
-
-    try {
-      _scanSub?.cancel();
-      _scanSub = _ble.scanStream.listen((device) {
-        final exists = _discoveredDevices.any(
-          (d) => d.deviceId == device.deviceId,
+      }),
+      bleRepository.onScanStateChanged.listen((_) {
+        emit(
+          BluetoothScanState(
+            devices: bleRepository.discoveredDevices,
+            isScanning: bleRepository.isScanning,
+          ),
         );
-        if (!exists) {
-          _discoveredDevices.add(device);
-          emit(BluetoothScanResult(List.unmodifiable(_discoveredDevices)));
-          // Log each new device discovery
-          _log(
-            BleLogEntry.system(
-              deviceId: device.deviceId,
-              deviceName: device.name,
-              type: LogType.scan,
-              message:
-                  'Discovered: "${device.name ?? "Unknown"}"'
-                  '${device.rssi != null ? " — RSSI ${device.rssi} dBm" : ""}',
-            ),
-          );
-
-          // ── In-app auto-reconnect ──────────────────────────────────
-          // If this device is in our paired list and we are not already
-          // connecting/connected to it, auto-connect immediately.
-          final currentState = state;
-          if (_pairedDeviceIds.contains(device.deviceId) &&
-              !_connectedDevices.containsKey(device.deviceId) &&
-              !(currentState is BluetoothConnecting && currentState.device.deviceId == device.deviceId)) {
-            debugPrint(
-              '[BLE] Auto-connecting to paired device: ${device.deviceId}',
-            );
-            connect(device);
-          }
-        }
-      });
-
-      await _ble.startScan(withServices: withServices);
-    } catch (e) {
-      emit(BluetoothError(e.toString()));
-    }
-  }
-
-  /// Stop scanning.
-  Future<void> stopScan() async {
-    try {
-      await _ble.stopScan();
-      _scanSub?.cancel();
-      emit(BluetoothScanStopped());
-    } catch (e) {
-      emit(BluetoothError(e.toString()));
-    }
-  }
-
-  // ══════════════════════════════════════════════
-  // SECTION 3 – CONNECTION
-  // ══════════════════════════════════════════════
-
-  final Map<String, BleDevice> _connectedDevices = {};
-  Map<String, BleDevice> get connectedDevices => Map.unmodifiable(_connectedDevices);
-  final Map<String, StreamSubscription<bool>> _connectionSubs = {};
-
-  /// Connect to [device] and start monitoring its connection state.
-  Future<void> connect(BleDevice device) async {
-    emit(BluetoothConnecting(device));
-    await _log(
-      BleLogEntry.system(
-        deviceId: device.deviceId,
-        deviceName: device.name,
-        type: LogType.connect,
-        message: 'Connecting to "${device.name ?? device.deviceId}"…',
-      ),
-    );
-    try {
-      await _ble.connect(device);
-      _connectedDevices[device.deviceId] = device;
-
-      _connectionSubs[device.deviceId]?.cancel();
-      _connectionSubs[device.deviceId] = _ble.connectionStream(device).listen((isConnected) {
-        if (isConnected) {
-          emit(BluetoothConnected(device));
-          _log(
-            BleLogEntry.system(
-              deviceId: device.deviceId,
-              deviceName: device.name,
-              type: LogType.connect,
-              message: 'Connected to "${device.name ?? device.deviceId}"',
-            ),
-          );
+      }),
+      bleRepository.onConnectionStateChanged.listen((event) {
+        final status = _mapRepoConnectionStatus(event.status);
+        emit(BluetoothConnectionState(device: event.device, status: status));
+        // Also fire scan state to ensure UI updates if device moved from discovered to connected?
+        // Let's rely on standard UI rebuilding.
+      }),
+      bleRepository.onError.listen((error) {
+        emit(BluetoothError(error));
+      }),
+      bleRepository.onPairingEvent.listen((event) {
+        emit(
+          BluetoothPairingState(
+            pairedDeviceIds: bleRepository.pairedDeviceIds,
+            isLoading: event.isLoading,
+            changedDeviceId: event.deviceId,
+            isPaired: event.isPaired,
+          ),
+        );
+      }),
+      logRepository.onLogsUpdated.listen((deviceId) {
+        if (deviceId == 'all') {
+          emit(BluetoothLogsUpdated('all', logRepository.allLogs));
         } else {
-          emit(BluetoothDisconnected(device));
-          _connectedDevices.remove(device.deviceId);
-          _log(
-            BleLogEntry.system(
-              deviceId: device.deviceId,
-              deviceName: device.name,
-              type: LogType.disconnect,
-              message: 'Disconnected from "${device.name ?? device.deviceId}"',
-            ),
-          );
-          NotificationService.showNotification(
-            id: device.deviceId.hashCode ^ 3,
-            title: 'Device Disconnected',
-            body: 'Lost connection to ${device.name ?? device.deviceId}',
+          emit(
+            BluetoothLogsUpdated(deviceId, logRepository.deviceLogs(deviceId)),
           );
         }
-      });
-
-      emit(BluetoothConnected(device));
-    } catch (e) {
-      await _log(
-        BleLogEntry.system(
-          deviceId: device.deviceId,
-          deviceName: device.name,
-          type: LogType.error,
-          message: 'Connection failed: $e',
-        ),
-      );
-      emit(BluetoothError(e.toString()));
-    }
+      }),
+    ];
   }
 
-  /// Disconnect from the specific [device].
-  Future<void> disconnect(BleDevice device) async {
-    if (!_connectedDevices.containsKey(device.deviceId)) return;
-    try {
-      await _ble.disconnect(device);
-      _connectionSubs[device.deviceId]?.cancel();
-      _connectionSubs.remove(device.deviceId);
-      emit(BluetoothDisconnected(device));
-      _connectedDevices.remove(device.deviceId);
-      await _log(
-        BleLogEntry.system(
-          deviceId: device.deviceId,
-          deviceName: device.name,
-          type: LogType.disconnect,
-          message: 'Disconnected (user initiated)',
-        ),
-      );
-    } catch (e) {
-      emit(BluetoothError(e.toString()));
-    }
+  // ── DELEGATED PROPERTIES (For UI backward compatibility) ─────
+
+  Set<String> get pairedDeviceIds => bleRepository.pairedDeviceIds;
+  List<BleDevice> get discoveredDevices => bleRepository.discoveredDevices;
+  Map<String, BleDevice> get connectedDevices => bleRepository.connectedDevices;
+  List<BleLogEntry> get allLogs => logRepository.allLogs;
+
+  // ── OPERATIONS ──────────────────────────────────────────────
+
+  Future<void> initialize() async {
+    emit(BluetoothLoading());
+    await bleRepository.initialize();
   }
 
-  // ══════════════════════════════════════════════
-  // SECTION 4 – SERVICE DISCOVERY
-  // ══════════════════════════════════════════════
+  Future<void> loadDeviceLogs(String deviceId) =>
+      logRepository.loadDeviceLogs(deviceId);
 
-  List<BleService> _services = [];
+  Future<void> loadAllLogs() => logRepository.loadAllLogs();
 
-  /// Discover services on [device] (auto-called if you skip it).
-  Future<void> discoverServices(BleDevice device) async {
-    try {
-      _services = await _ble.discoverServices(device);
-      await _log(
-        BleLogEntry.system(
-          deviceId: device.deviceId,
-          deviceName: device.name,
-          type: LogType.serviceDiscovery,
-          message:
-              'Discovered ${_services.length} service(s): '
-              '${_services.map((s) => s.uuid).join(", ")}',
-        ),
-      );
-      emit(BluetoothServicesDiscovered(device, _services));
-    } catch (e) {
-      emit(BluetoothError(e.toString()));
-    }
+  Future<void> startScan({List<String> withServices = const []}) async {
+    await bleRepository.startScan(withServices: withServices);
   }
 
-  // ══════════════════════════════════════════════
-  // SECTION 5 – READ / WRITE DATA
-  // ══════════════════════════════════════════════
+  Future<void> stopScan() async {
+    await bleRepository.stopScan();
+  }
 
-  /// Read from [characteristic] and emit [BluetoothDataRead].
+  Future<void> connect(BleDevice device) => bleRepository.connect(device);
+
+  Future<void> disconnect(BleDevice device) => bleRepository.disconnect(device);
+
+  Future<void> discoverServices(BleDevice device) =>
+      bleRepository.discoverServices(device);
+
   Future<void> read(
     BleCharacteristic characteristic, {
     String? deviceId,
     String? deviceName,
-  }) async {
-    try {
-      final data = await _ble.read(characteristic);
-      if (deviceId != null) {
-        await _log(
-          BleLogEntry.data(
-            deviceId: deviceId,
-            deviceName: deviceName,
-            direction: LogDirection.incoming,
-            type: LogType.read,
-            message: 'Read from ${characteristic.uuid}',
-            bytes: data,
-          ),
-        );
-      }
-      emit(BluetoothDataRead(data));
-    } catch (e) {
-      emit(BluetoothError(e.toString()));
-    }
-  }
+  }) => bleRepository.read(
+    characteristic,
+    deviceId: deviceId,
+    deviceName: deviceName,
+  );
 
-  /// Write [data] to [characteristic].
   Future<void> write(
     BleCharacteristic characteristic,
     List<int> data, {
     bool withResponse = true,
     String? deviceId,
     String? deviceName,
-  }) async {
-    try {
-      await _ble.write(characteristic, data, withResponse: withResponse);
-      if (deviceId != null) {
-        await _log(
-          BleLogEntry.data(
-            deviceId: deviceId,
-            deviceName: deviceName,
-            direction: LogDirection.outgoing,
-            type: LogType.write,
-            message:
-                'Write${withResponse ? " (with response)" : " (no response)"} '
-                'to ${characteristic.uuid}',
-            bytes: Uint8List.fromList(data),
-          ),
-        );
-      }
-      emit(BluetoothDataWritten());
-    } catch (e) {
-      emit(BluetoothError(e.toString()));
-    }
-  }
+  }) => bleRepository.write(
+    characteristic,
+    data,
+    withResponse: withResponse,
+    deviceId: deviceId,
+    deviceName: deviceName,
+  );
 
-  // ══════════════════════════════════════════════
-  // SECTION 6 – SUBSCRIPTIONS
-  // ══════════════════════════════════════════════
-
-  final Map<String, StreamSubscription<Uint8List>> _notifySubs = {};
-
-  /// Subscribe to notifications (or indications) on [characteristic].
   Future<void> subscribe(
     BleCharacteristic characteristic, {
     bool useIndications = false,
     String? deviceId,
     String? deviceName,
-  }) async {
-    try {
-      _notifySubs[characteristic.uuid.toString()]?.cancel();
-      void handler(Uint8List data) {
-        if (deviceId != null) {
-          _log(
-            BleLogEntry.data(
-              deviceId: deviceId,
-              deviceName: deviceName,
-              direction: LogDirection.incoming,
-              type: useIndications ? LogType.indicate : LogType.notify,
-              message:
-                  '${useIndications ? "Indication" : "Notification"} from ${characteristic.uuid}',
-              bytes: data,
-            ),
-          );
-        }
-        emit(BluetoothDataReceived(data));
-      }
+  }) => bleRepository.subscribe(
+    characteristic,
+    useIndications: useIndications,
+    deviceId: deviceId,
+    deviceName: deviceName,
+  );
 
-      final subKey = characteristic.uuid.toString();
-      if (useIndications) {
-        _notifySubs[subKey] = await _ble.subscribeIndications(characteristic, handler);
-      } else {
-        _notifySubs[subKey] = await _ble.subscribeNotifications(characteristic, handler);
-      }
-      if (deviceId != null) {
-        await _log(
-          BleLogEntry.system(
-            deviceId: deviceId,
-            deviceName: deviceName,
-            type: LogType.info,
-            message:
-                'Subscribed to ${useIndications ? "indications" : "notifications"} '
-                'on ${characteristic.uuid}',
-          ),
-        );
-      }
-      emit(BluetoothSubscribed());
-    } catch (e) {
-      emit(BluetoothError(e.toString()));
+  Future<void> unsubscribe(BleCharacteristic characteristic) =>
+      bleRepository.unsubscribe(characteristic);
+
+  Future<void> pairDevice(BleDevice device, {BleCommand? pairingCommand}) =>
+      bleRepository.pairDevice(device, pairingCommand: pairingCommand);
+
+  Future<void> unpairDevice(BleDevice device) =>
+      bleRepository.unpairDevice(device);
+
+  BleConnectionStatus _mapRepoConnectionStatus(RepoConnectionStatus status) {
+    switch (status) {
+      case RepoConnectionStatus.connecting:
+        return BleConnectionStatus.connecting;
+      case RepoConnectionStatus.connected:
+        return BleConnectionStatus.connected;
+      case RepoConnectionStatus.disconnected:
+        return BleConnectionStatus.disconnected;
     }
   }
-
-  /// Cancel the active subscription on [characteristic].
-  Future<void> unsubscribe(BleCharacteristic characteristic) async {
-    try {
-      await _ble.unsubscribe(characteristic);
-      final subKey = characteristic.uuid.toString();
-      _notifySubs[subKey]?.cancel();
-      _notifySubs.remove(subKey);
-    } catch (e) {
-      emit(BluetoothError(e.toString()));
-    }
-  }
-
-  // ══════════════════════════════════════════════
-  // SECTION 7 – PAIRING
-  // ══════════════════════════════════════════════
-
-  /// Pair with [device].
-  Future<void> pairDevice(
-    BleDevice device, {
-    BleCommand? pairingCommand,
-  }) async {
-    emit(BluetoothPairingInProgress(device.deviceId));
-    await _log(
-      BleLogEntry.system(
-        deviceId: device.deviceId,
-        deviceName: device.name,
-        type: LogType.pair,
-        message: 'Pairing requested with "${device.name ?? device.deviceId}"…',
-      ),
-    );
-    try {
-      await _ble.pair(device, pairingCommand: pairingCommand);
-      await PairingStorage.savePaired(device.deviceId);
-      _pairedDeviceIds = await PairingStorage.loadPairedIds();
-      await _log(
-        BleLogEntry.system(
-          deviceId: device.deviceId,
-          deviceName: device.name,
-          type: LogType.pair,
-          message: 'Paired successfully & saved to storage',
-        ),
-      );
-      await NotificationService.showNotification(
-        id: device.deviceId.hashCode ^ 4,
-        title: 'Device Paired',
-        body: 'Successfully paired with ${device.name ?? device.deviceId}',
-      );
-      // Start the background service so it watches for this device
-      await BackgroundServiceBridge.start();
-      emit(
-        BluetoothPaired(
-          deviceId: device.deviceId,
-          isPaired: true,
-          pairedDeviceIds: Set.unmodifiable(_pairedDeviceIds),
-        ),
-      );
-      // 🔥 Connect immediately after successful pair
-      connect(device);
-    } catch (e) {
-      await _log(
-        BleLogEntry.system(
-          deviceId: device.deviceId,
-          deviceName: device.name,
-          type: LogType.error,
-          message: 'Pair failed: $e',
-        ),
-      );
-      emit(BluetoothError(e.toString()));
-    }
-  }
-
-  /// Unpair [device].
-  Future<void> unpairDevice(BleDevice device) async {
-    emit(BluetoothPairingInProgress(device.deviceId));
-    await _log(
-      BleLogEntry.system(
-        deviceId: device.deviceId,
-        deviceName: device.name,
-        type: LogType.unpair,
-        message: 'Unpair requested for "${device.name ?? device.deviceId}"…',
-      ),
-    );
-    try {
-      await _ble.unpair(device);
-      await PairingStorage.removePaired(device.deviceId);
-      _pairedDeviceIds = await PairingStorage.loadPairedIds();
-      await _log(
-        BleLogEntry.system(
-          deviceId: device.deviceId,
-          deviceName: device.name,
-          type: LogType.unpair,
-          message: 'Unpaired & removed from storage',
-        ),
-      );
-      // Stop background service if no paired devices remain
-      if (_pairedDeviceIds.isEmpty) {
-        await BackgroundServiceBridge.stop();
-      }
-      emit(
-        BluetoothPaired(
-          deviceId: device.deviceId,
-          isPaired: false,
-          pairedDeviceIds: Set.unmodifiable(_pairedDeviceIds),
-        ),
-      );
-    } catch (e) {
-      await _log(
-        BleLogEntry.system(
-          deviceId: device.deviceId,
-          deviceName: device.name,
-          type: LogType.error,
-          message: 'Unpair failed: $e',
-        ),
-      );
-      emit(BluetoothError(e.toString()));
-    }
-  }
-
-  // ══════════════════════════════════════════════
-  // CLEANUP
-  // ══════════════════════════════════════════════
 
   @override
-  Future<void> close() async {
-    await _availabilitySub?.cancel();
-    await _globalConnectionSub?.cancel();
-    await _scanSub?.cancel();
-    for (final sub in _connectionSubs.values) {
-      await sub.cancel();
+  Future<void> close() {
+    for (final sub in _subscriptions) {
+      sub.cancel();
     }
-    for (final sub in _notifySubs.values) {
-      await sub.cancel();
-    }
+    // We do NOT dispose repositories here if they are singletons injected from above.
     return super.close();
   }
 }

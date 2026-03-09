@@ -32,17 +32,10 @@ class BluetoothService {
   Stream<BleConnectionEvent> get connectionStateStream =>
       _connectionEventController.stream;
 
+  bool _initialized = false;
+
   // ══════════════════════════════════════════════
   // SECTION 1 – INITIALIZE
-  // ══════════════════════════════════════════════
-  // Call this once at app start (e.g. from main or
-  // BLoC constructor) to:
-  //   • check Bluetooth availability
-  //   • wire up the global availability listener
-  //   • configure queue / timeout / log level
-  //
-  // Returns the current [AvailabilityState] so the
-  // caller can decide whether scanning is possible.
   // ══════════════════════════════════════════════
 
   /// Stream that broadcasts [AvailabilityState] changes.
@@ -54,68 +47,60 @@ class BluetoothService {
   /// Safe to call multiple times – subsequent calls are no-ops
   /// because universal_ble manages its own native state.
   Future<AvailabilityState> initialize() async {
-    // Listen to background isolate events (e.g., disconnects intercepted by the background service)
-    FlutterForegroundTask.addTaskDataCallback((data) {
-      if (data is Map && data['type'] == 'connectionChange') {
-        final deviceId = data['deviceId'] as String?;
-        final isConnected = data['isConnected'] as bool?;
-        final error = data['error'] as String?;
+    if (!_initialized) {
+      _initialized = true;
 
-        if (deviceId != null && isConnected != null) {
-          debugPrint(
-            '[BLE-BG-SYNC] Connection change: $deviceId → '
-            '${isConnected ? "connected" : "disconnected"}'
-            '${error != null ? " ($error)" : ""}',
-          );
-          _connectionEventController.add(
-            BleConnectionEvent(
-              deviceId: deviceId,
-              isConnected: isConnected,
-              error: error,
-            ),
-          );
+      // Receive connection events forwarded by the background isolate.
+      FlutterForegroundTask.addTaskDataCallback((data) {
+        if (data is Map && data['type'] == 'connectionChange') {
+          final deviceId = data['deviceId'] as String?;
+          final isConnected = data['isConnected'] as bool?;
+          final error = data['error'] as String?;
+
+          if (deviceId != null && isConnected != null) {
+            debugPrint(
+              '[BLE-BG-SYNC] Connection change: $deviceId → '
+              '${isConnected ? "connected" : "disconnected"}'
+              '${error != null ? " ($error)" : ""}',
+            );
+            _connectionEventController.add(
+              BleConnectionEvent(
+                deviceId: deviceId,
+                isConnected: isConnected,
+                error: error,
+              ),
+            );
+          }
         }
-      }
-    });
+      });
 
-    // Set log level so we can see all BLE ops in the console
-    // during this POC phase.
+      // Fire for ALL connection changes at the platform level.
+      UniversalBle.onConnectionChange = (deviceId, isConnected, error) {
+        debugPrint(
+          '[BLE] Connection change: $deviceId → '
+          '${isConnected ? "connected" : "disconnected"}'
+          '${error != null ? " ($error)" : ""}',
+        );
+        _connectionEventController.add(
+          BleConnectionEvent(
+            deviceId: deviceId,
+            isConnected: isConnected,
+            error: error,
+          ),
+        );
+      };
+    }
+
+    // Set log level, queue type, and timeout.
     await UniversalBle.setLogLevel(BleLogLevel.verbose);
-
-    // Use a per-device queue so multiple devices can be
-    // operated in parallel without blocking each other.
     UniversalBle.queueType = QueueType.perDevice;
-
-    // 10-second command timeout (default, kept explicit).
     UniversalBle.timeout = const Duration(seconds: 10);
 
-    // Wire the global availability handler.
     UniversalBle.onAvailabilityChange = (AvailabilityState state) {
       debugPrint('[BLE] Availability changed → $state');
     };
 
-    // ── Global connection change handler ────────────────────────
-    // This fires for EVERY device: explicitly-connected GATT devices
-    // AND system-paired devices (earbuds, headsets) that connect or
-    // disconnect independently of the app.
-    UniversalBle.onConnectionChange = (deviceId, isConnected, error) {
-      debugPrint(
-        '[BLE] Connection change: $deviceId → '
-        '${isConnected ? "connected" : "disconnected"}'
-        '${error != null ? " ($error)" : ""}',
-      );
-      _connectionEventController.add(
-        BleConnectionEvent(
-          deviceId: deviceId,
-          isConnected: isConnected,
-          error: error,
-        ),
-      );
-    };
-
-    // Return current state so cubit can show the right UI.
     final state = await UniversalBle.getBluetoothAvailabilityState();
-    debugPrint('[BLE] Initial availability state: $state');
     return state;
   }
 
@@ -160,14 +145,6 @@ class BluetoothService {
 
   /// Whether a scan is currently in progress.
   Future<bool> isScanning() => UniversalBle.isScanning();
-
-  /// Returns devices that are already connected to the system
-  /// (e.g. paired via Settings) – they won't appear in scan results.
-  Future<List<BleDevice>> getSystemDevices({
-    List<String> withServices = const [],
-  }) async {
-    return UniversalBle.getSystemDevices(withServices: withServices);
-  }
 
   // ══════════════════════════════════════════════
   // SECTION 3 – CONNECTION
@@ -289,32 +266,7 @@ class BluetoothService {
     debugPrint('[BLE] Unpaired');
   }
 
-  /// Check whether a device is currently paired.
-  Future<bool?> isPaired(BleDevice device, {BleCommand? pairingCommand}) =>
-      device.isPaired(pairingCommand: pairingCommand);
-
-  /// Stream that emits `true`/`false` whenever pairing state changes.
-  Stream<bool> pairingStateStream(BleDevice device) =>
-      device.pairingStateStream;
-
-  // ══════════════════════════════════════════════
-  // SECTION 8 – EXTRAS (MTU / RSSI / PERMISSIONS)
-  // ══════════════════════════════════════════════
-
-  /// Request a larger MTU. Actual value is OS-controlled; this is
-  /// best-effort. Returns the negotiated MTU.
-  Future<int> requestMtu(BleDevice device, int desiredMtu) async {
-    final mtu = await device.requestMtu(desiredMtu);
-    debugPrint('[BLE] Negotiated MTU: $mtu');
-    return mtu;
-  }
-
-  /// Read RSSI (signal strength) of a connected device.
-  /// Supported on Android, iOS, macOS only.
-  Future<int> readRssi(BleDevice device) => device.readRssi();
-
   /// Request runtime Bluetooth permissions.
-  /// On Android you can control whether fine-location is requested.
   Future<void> requestPermissions({bool withAndroidFineLocation = false}) =>
       UniversalBle.requestPermissions(
         withAndroidFineLocation: withAndroidFineLocation,
