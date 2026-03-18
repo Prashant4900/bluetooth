@@ -175,7 +175,36 @@ class BleRepository {
         if (_pairedDeviceIds.contains(device.deviceId) &&
             !_connectedDevices.containsKey(device.deviceId) &&
             !_connectingDevices.contains(device.deviceId)) {
-          connect(device, delay: const Duration(milliseconds: 800));
+          // Check the real OS-level connection state first.
+          // If the OS already has an active connection (e.g., reconnected in
+          // background before app opened), sync our state without sending a
+          // redundant connect request to the device.
+          UniversalBle.getConnectionState(device.deviceId).then((state) {
+            if (state == BleConnectionState.connected) {
+              debugPrint(
+                '[BLE] ${device.name ?? device.deviceId} already connected '
+                'at OS level — skipping connect request',
+              );
+              _connectingDevices.remove(device.deviceId);
+              _connectedDevices[device.deviceId] = device;
+              _connectionStateController.add(
+                RepoConnectionEvent(device, RepoConnectionStatus.connected),
+              );
+              logRepository.addLog(
+                BleLogEntry.system(
+                  deviceId: device.deviceId,
+                  deviceName: device.name,
+                  message:
+                      'Already connected to "${device.name ?? device.deviceId}" — synced state',
+                ),
+              );
+            } else {
+              connect(device, delay: const Duration(milliseconds: 800));
+            }
+          }).catchError((_) {
+            // If we can't determine state, fall back to connecting normally.
+            connect(device, delay: const Duration(milliseconds: 800));
+          });
         }
       });
 
@@ -416,6 +445,15 @@ class BleRepository {
       ),
     );
     try {
+      // Explicitly disconnect if currently connected so the OS-level BLE
+      // connection is terminated. Without this, unpairing only removes the
+      // device from app state while the GATT connection stays alive,
+      // preventing the physical device from auto-powering off.
+      if (_connectedDevices.containsKey(device.deviceId)) {
+        await ble.disconnect(device);
+        _connectedDevices.remove(device.deviceId);
+        debugPrint('[BLE] Disconnected before unpairing ${device.name ?? device.deviceId}');
+      }
       await ble.unpair(device);
       await PairingStorage.removePaired(device.deviceId);
       _pairedDeviceIds = await PairingStorage.loadPairedIds();
