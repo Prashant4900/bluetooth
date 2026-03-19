@@ -1,36 +1,31 @@
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// Persists paired device IDs locally using SharedPreferences.
+/// Persists the set of paired device IDs in SharedPreferences.
 ///
-/// Key layout:
-///   ble_paired_devices  →  comma-separated list of device ID strings
+/// Storage key:  `ble_paired_devices` → List<String> of device IDs
 class PairingStorage {
-  static const _kKey = 'ble_paired_devices';
+  PairingStorage._();
 
-  // ── Read ──────────────────────────────────────
+  static const _key = 'ble_paired_devices';
 
-  /// Returns the set of device IDs that have been saved as paired.
+  // ── Read ─────────────────────────────────────────────────────────────────
+
   static Future<Set<String>> loadPairedIds() async {
     final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getStringList(_kKey) ?? [];
-    return raw.toSet();
+    return (prefs.getStringList(_key) ?? []).toSet();
   }
 
-  // ── Write ─────────────────────────────────────
+  // ── Write ────────────────────────────────────────────────────────────────
 
-  /// Mark [deviceId] as paired and persist it.
   static Future<void> savePaired(String deviceId) async {
     final prefs = await SharedPreferences.getInstance();
-    final ids = (prefs.getStringList(_kKey) ?? []).toSet();
-    ids.add(deviceId);
-    await prefs.setStringList(_kKey, ids.toList());
+    final ids = (prefs.getStringList(_key) ?? []).toSet()..add(deviceId);
+    await prefs.setStringList(_key, ids.toList());
   }
 
-  /// Remove [deviceId] from the paired list.
   static Future<void> removePaired(String deviceId) async {
     final prefs = await SharedPreferences.getInstance();
-    final ids = (prefs.getStringList(_kKey) ?? []).toSet();
-    ids.remove(deviceId);
-    await prefs.setStringList(_kKey, ids.toList());
+    final ids = (prefs.getStringList(_key) ?? []).toSet()..remove(deviceId);
+    await prefs.setStringList(_key, ids.toList());
   }
 }

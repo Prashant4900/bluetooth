@@ -13,8 +13,13 @@ class AllLogsScreen extends StatefulWidget {
 
 class _AllLogsScreenState extends State<AllLogsScreen> {
   late final BluetoothCubit _cubit;
-  final ScrollController _scrollCtrl = ScrollController();
+  final _scrollCtrl = ScrollController();
   String? _selectedDeviceId;
+
+  // ── Theme colours ────────────────────────────────────────────────────────
+  static const _bgDark = Color(0xFF0D1117);
+  static const _bgBar = Color(0xFF161B22);
+  static const _bgDrop = Color(0xFF21262D);
 
   @override
   void initState() {
@@ -42,99 +47,49 @@ class _AllLogsScreenState extends State<AllLogsScreen> {
   }
 
   List<BleLogEntry> _applyFilter(List<BleLogEntry> logs) {
-    var filtered = logs
+    return logs
         .where((e) => e.deviceName?.startsWith('LMNP') == true)
+        .where(
+          (e) => _selectedDeviceId == null || e.deviceId == _selectedDeviceId,
+        )
         .toList();
+  }
 
-    if (_selectedDeviceId != null) {
-      filtered = filtered
-          .where((e) => e.deviceId == _selectedDeviceId)
-          .toList();
-    }
-
-    return filtered;
+  // Builds a map of deviceId → displayName for devices that appear in the logs.
+  Map<String, String> _buildDeviceMap(List<BleLogEntry> logs) {
+    return {
+      for (final log in logs)
+        if (log.deviceName?.startsWith('LMNP') == true)
+          log.deviceId:
+              log.deviceName ?? 'Unknown (${log.deviceId.substring(0, 5)}…)',
+    };
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFF0D1117),
+      backgroundColor: _bgDark,
       appBar: AppBar(
-        backgroundColor: const Color(0xFF161B22),
+        backgroundColor: _bgBar,
         foregroundColor: Colors.white,
         title: const Text(
           'All Global Logs',
           style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
         ),
       ),
-
       body: Column(
         children: [
-          // ── Device filter dropdown ──
-          Container(
-            color: const Color(0xFF161B22),
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            child: Row(
-              children: [
-                const Text(
-                  'Device:',
-                  style: TextStyle(color: Colors.white70, fontSize: 13),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: BlocBuilder<BluetoothCubit, BluetoothState>(
-                    buildWhen: (_, curr) => curr is BluetoothLogsUpdated,
-                    builder: (context, _) {
-                      final logs = _cubit.allLogs;
-                      final deviceMap = <String, String>{};
-                      for (final log in logs) {
-                        if (log.deviceName?.startsWith('LMNP') == true) {
-                          deviceMap[log.deviceId] =
-                              log.deviceName ??
-                              'Unknown (${log.deviceId.substring(0, 5)}...)';
-                        }
-                      }
-
-                      return DropdownButton<String?>(
-                        value: _selectedDeviceId,
-                        dropdownColor: const Color(0xFF21262D),
-                        isExpanded: true,
-                        icon: const Icon(
-                          Icons.arrow_drop_down,
-                          color: Colors.white70,
-                        ),
-                        underline: const SizedBox(),
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 13,
-                        ),
-                        onChanged: (String? newValue) {
-                          setState(() {
-                            _selectedDeviceId = newValue;
-                          });
-                          _scrollToBottom();
-                        },
-                        items: [
-                          const DropdownMenuItem<String?>(
-                            value: null,
-                            child: Text('All Devices'),
-                          ),
-                          ...deviceMap.entries.map(
-                            (entry) => DropdownMenuItem<String?>(
-                              value: entry.key,
-                              child: Text(entry.value),
-                            ),
-                          ),
-                        ],
-                      );
-                    },
-                  ),
-                ),
-              ],
-            ),
+          _DeviceFilterBar(
+            bgColor: _bgBar,
+            dropdownColor: _bgDrop,
+            selectedDeviceId: _selectedDeviceId,
+            deviceMap: _buildDeviceMap(_cubit.allLogs),
+            cubit: _cubit,
+            onChanged: (id) {
+              setState(() => _selectedDeviceId = id);
+              _scrollToBottom();
+            },
           ),
-
-          // ── Log list ──
           Expanded(
             child: BlocConsumer<BluetoothCubit, BluetoothState>(
               listenWhen: (_, curr) =>
@@ -142,35 +97,12 @@ class _AllLogsScreenState extends State<AllLogsScreen> {
               listener: (_, _) => _scrollToBottom(),
               buildWhen: (_, curr) =>
                   curr is BluetoothLogsUpdated && curr.deviceId == 'all',
-              builder: (context, _) {
+              builder: (_, _) {
                 final logs = _cubit.allLogs;
                 final filtered = _applyFilter(logs);
 
-                if (filtered.isEmpty) {
-                  return Center(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          Icons.terminal,
-                          size: 48,
-                          color: Colors.grey.shade700,
-                        ),
-                        const SizedBox(height: 12),
-                        Text(
-                          logs.isEmpty
-                              ? 'No logs yet.\nInteract with any device to see events.'
-                              : 'No logs matching filter.',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(
-                            color: Colors.grey.shade600,
-                            fontSize: 14,
-                          ),
-                        ),
-                      ],
-                    ),
-                  );
-                }
+                if (filtered.isEmpty)
+                  return _EmptyLogsPlaceholder(hasLogs: logs.isNotEmpty);
 
                 return ListView.builder(
                   controller: _scrollCtrl,
@@ -185,6 +117,110 @@ class _AllLogsScreenState extends State<AllLogsScreen> {
                 );
               },
             ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Private sub-widgets
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _DeviceFilterBar extends StatelessWidget {
+  final Color bgColor;
+  final Color dropdownColor;
+  final String? selectedDeviceId;
+  final Map<String, String> deviceMap;
+  final BluetoothCubit cubit;
+  final ValueChanged<String?> onChanged;
+
+  const _DeviceFilterBar({
+    required this.bgColor,
+    required this.dropdownColor,
+    required this.selectedDeviceId,
+    required this.deviceMap,
+    required this.cubit,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      color: bgColor,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: Row(
+        children: [
+          const Text(
+            'Device:',
+            style: TextStyle(color: Colors.white70, fontSize: 13),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: BlocBuilder<BluetoothCubit, BluetoothState>(
+              buildWhen: (_, curr) => curr is BluetoothLogsUpdated,
+              builder: (_, _) {
+                final map = _buildDeviceMap(cubit.allLogs);
+                return DropdownButton<String?>(
+                  value: selectedDeviceId,
+                  dropdownColor: dropdownColor,
+                  isExpanded: true,
+                  icon: const Icon(
+                    Icons.arrow_drop_down,
+                    color: Colors.white70,
+                  ),
+                  underline: const SizedBox(),
+                  style: const TextStyle(color: Colors.white, fontSize: 13),
+                  onChanged: onChanged,
+                  items: [
+                    const DropdownMenuItem<String?>(
+                      value: null,
+                      child: Text('All Devices'),
+                    ),
+                    ...map.entries.map(
+                      (e) => DropdownMenuItem<String?>(
+                        value: e.key,
+                        child: Text(e.value),
+                      ),
+                    ),
+                  ],
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Map<String, String> _buildDeviceMap(List<BleLogEntry> logs) => {
+    for (final log in logs)
+      if (log.deviceName?.startsWith('LMNP') == true)
+        log.deviceId:
+            log.deviceName ?? 'Unknown (${log.deviceId.substring(0, 5)}…)',
+  };
+}
+
+class _EmptyLogsPlaceholder extends StatelessWidget {
+  final bool hasLogs;
+
+  const _EmptyLogsPlaceholder({required this.hasLogs});
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.terminal, size: 48, color: Colors.grey.shade700),
+          const SizedBox(height: 12),
+          Text(
+            hasLogs
+                ? 'No logs matching filter.'
+                : 'No logs yet.\nInteract with any device to see events.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Colors.grey.shade600, fontSize: 14),
           ),
         ],
       ),

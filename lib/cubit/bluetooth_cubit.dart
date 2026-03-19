@@ -9,8 +9,8 @@ import 'package:universal_ble/universal_ble.dart';
 
 part 'bluetooth_state.dart';
 
-/// A lightweight proxy that manages BLE states for the UI
-/// by consuming BleRepository and BleLogRepository.
+/// Thin proxy between the UI and the BLE repositories.
+/// Translates repository streams into [BluetoothState] emissions.
 class BluetoothCubit extends Cubit<BluetoothState> {
   final BleRepository bleRepository;
   final BleLogRepository logRepository;
@@ -21,13 +21,9 @@ class BluetoothCubit extends Cubit<BluetoothState> {
     : super(BluetoothLoading()) {
     _subscriptions = [
       bleRepository.onPairedDevicesChanged.listen((pairedIds) {
-        emit(
-          BluetoothPairingState(
-            pairedDeviceIds: pairedIds,
-            // Assuming changedDeviceId isn't strictly necessary here, or we get it from pairing events.
-          ),
-        );
+        emit(BluetoothPairingState(pairedDeviceIds: pairedIds));
       }),
+
       bleRepository.onScanStateChanged.listen((_) {
         emit(
           BluetoothScanState(
@@ -36,15 +32,16 @@ class BluetoothCubit extends Cubit<BluetoothState> {
           ),
         );
       }),
+
       bleRepository.onConnectionStateChanged.listen((event) {
-        final status = _mapRepoConnectionStatus(event.status);
-        emit(BluetoothConnectionState(device: event.device, status: status));
-        // Also fire scan state to ensure UI updates if device moved from discovered to connected?
-        // Let's rely on standard UI rebuilding.
+        emit(
+          BluetoothConnectionState(
+            device: event.device,
+            status: _toConnectionStatus(event.status),
+          ),
+        );
       }),
-      bleRepository.onError.listen((error) {
-        emit(BluetoothError(error));
-      }),
+
       bleRepository.onPairingEvent.listen((event) {
         emit(
           BluetoothPairingState(
@@ -55,44 +52,36 @@ class BluetoothCubit extends Cubit<BluetoothState> {
           ),
         );
       }),
+
+      bleRepository.onError.listen((error) => emit(BluetoothError(error))),
+
       logRepository.onLogsUpdated.listen((deviceId) {
-        if (deviceId == 'all') {
-          emit(BluetoothLogsUpdated('all', logRepository.allLogs));
-        } else {
-          emit(
-            BluetoothLogsUpdated(deviceId, logRepository.deviceLogs(deviceId)),
-          );
-        }
+        final logs = deviceId == 'all'
+            ? logRepository.allLogs
+            : logRepository.deviceLogs(deviceId);
+        emit(BluetoothLogsUpdated(deviceId, logs));
       }),
     ];
   }
 
-  // ── DELEGATED PROPERTIES (For UI backward compatibility) ─────
+  // ── Delegated getters (UI convenience) ──────────────────────────────────
 
   Set<String> get pairedDeviceIds => bleRepository.pairedDeviceIds;
   List<BleDevice> get discoveredDevices => bleRepository.discoveredDevices;
   Map<String, BleDevice> get connectedDevices => bleRepository.connectedDevices;
   List<BleLogEntry> get allLogs => logRepository.allLogs;
 
-  // ── OPERATIONS ──────────────────────────────────────────────
+  // ── Operations ───────────────────────────────────────────────────────────
 
   Future<void> initialize() async {
     emit(BluetoothLoading());
     await bleRepository.initialize();
   }
 
-  Future<void> loadDeviceLogs(String deviceId) =>
-      logRepository.loadDeviceLogs(deviceId);
+  Future<void> startScan({List<String> withServices = const []}) =>
+      bleRepository.startScan(withServices: withServices);
 
-  Future<void> loadAllLogs() => logRepository.loadAllLogs();
-
-  Future<void> startScan({List<String> withServices = const []}) async {
-    await bleRepository.startScan(withServices: withServices);
-  }
-
-  Future<void> stopScan() async {
-    await bleRepository.stopScan();
-  }
+  Future<void> stopScan() => bleRepository.stopScan();
 
   Future<void> connect(BleDevice device) => bleRepository.connect(device);
 
@@ -146,23 +135,24 @@ class BluetoothCubit extends Cubit<BluetoothState> {
   Future<void> unpairDevice(BleDevice device) =>
       bleRepository.unpairDevice(device);
 
-  BleConnectionStatus _mapRepoConnectionStatus(RepoConnectionStatus status) {
-    switch (status) {
-      case RepoConnectionStatus.connecting:
-        return BleConnectionStatus.connecting;
-      case RepoConnectionStatus.connected:
-        return BleConnectionStatus.connected;
-      case RepoConnectionStatus.disconnected:
-        return BleConnectionStatus.disconnected;
-    }
-  }
+  Future<void> loadDeviceLogs(String deviceId) =>
+      logRepository.loadDeviceLogs(deviceId);
+
+  Future<void> loadAllLogs() => logRepository.loadAllLogs();
+
+  // ── Helpers ──────────────────────────────────────────────────────────────
+
+  BleConnectionStatus _toConnectionStatus(RepoConnectionStatus status) =>
+      switch (status) {
+        RepoConnectionStatus.connecting => BleConnectionStatus.connecting,
+        RepoConnectionStatus.connected => BleConnectionStatus.connected,
+        RepoConnectionStatus.disconnected => BleConnectionStatus.disconnected,
+      };
 
   @override
   Future<void> close() {
-    for (final sub in _subscriptions) {
-      sub.cancel();
-    }
-    // We do NOT dispose repositories here if they are singletons injected from above.
+    for (final sub in _subscriptions) sub.cancel();
+    // Repositories are injected from above — dispose them there, not here.
     return super.close();
   }
 }

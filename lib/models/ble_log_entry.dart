@@ -1,22 +1,17 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
-// ─────────────────────────────────────────────────
-// BleLogEntry
-// ─────────────────────────────────────────────────
-
 class BleLogEntry {
   final String id;
   final DateTime timestamp;
   final String deviceId;
   final String? deviceName;
-
   final String message;
 
-  /// Raw bytes as an uppercase hex string, e.g. "0A 1B FF"
+  /// Raw bytes as an uppercase hex string, e.g. "0A 1B FF".
   final String? hexData;
 
-  /// Same bytes decoded as ASCII – only populated when all bytes are printable.
+  /// Bytes decoded as ASCII — only set when every byte is a printable character.
   final String? asciiData;
 
   BleLogEntry({
@@ -24,28 +19,27 @@ class BleLogEntry {
     required this.timestamp,
     required this.deviceId,
     this.deviceName,
-
     required this.message,
     this.hexData,
     this.asciiData,
   });
 
-  // ── Factory helpers ────────────────────────────
+  // ── Factories ────────────────────────────────────────────────────────────
 
+  /// Creates a plain text (non-data) log entry for system events.
   factory BleLogEntry.system({
     required String deviceId,
     String? deviceName,
     required String message,
-  }) {
-    return BleLogEntry(
-      id: DateTime.now().microsecondsSinceEpoch.toString(),
-      timestamp: DateTime.now(),
-      deviceId: deviceId,
-      deviceName: deviceName,
-      message: message,
-    );
-  }
+  }) => BleLogEntry(
+    id: DateTime.now().microsecondsSinceEpoch.toString(),
+    timestamp: DateTime.now(),
+    deviceId: deviceId,
+    deviceName: deviceName,
+    message: message,
+  );
 
+  /// Creates a log entry that also carries raw BLE bytes.
   factory BleLogEntry.data({
     required String deviceId,
     String? deviceName,
@@ -55,8 +49,10 @@ class BleLogEntry {
     final hex = bytes
         .map((b) => b.toRadixString(16).padLeft(2, '0').toUpperCase())
         .join(' ');
+
+    // Only decode to ASCII when every byte is a printable character (32–126).
     final isPrintable = bytes.every((b) => b >= 32 && b < 127);
-    final ascii = isPrintable ? utf8.decode(bytes, allowMalformed: true) : null;
+
     return BleLogEntry(
       id: DateTime.now().microsecondsSinceEpoch.toString(),
       timestamp: DateTime.now(),
@@ -64,11 +60,11 @@ class BleLogEntry {
       deviceName: deviceName,
       message: message,
       hexData: hex.isNotEmpty ? hex : null,
-      asciiData: ascii,
+      asciiData: isPrintable ? utf8.decode(bytes, allowMalformed: true) : null,
     );
   }
 
-  // ── JSON ───────────────────────────────────────
+  // ── JSON ─────────────────────────────────────────────────────────────────
 
   Map<String, dynamic> toJson() => {
     'id': id,
@@ -90,8 +86,9 @@ class BleLogEntry {
     asciiData: j['ascii'] as String?,
   );
 
-  // ── Display helpers ────────────────────────────
+  // ── Display helpers ──────────────────────────────────────────────────────
 
+  /// Human-readable timestamp: HH:MM:SS.mmm
   String get timeLabel {
     final h = timestamp.hour.toString().padLeft(2, '0');
     final m = timestamp.minute.toString().padLeft(2, '0');

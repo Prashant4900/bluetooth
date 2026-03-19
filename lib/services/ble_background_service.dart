@@ -10,24 +10,20 @@ import 'package:universal_ble/src/universal_ble_pigeon/universal_ble.g.dart';
 import 'package:universal_ble/universal_ble.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Entry point — called by flutter_foreground_task in the background isolate.
-// Must be a top-level function annotated with @pragma('vm:entry-point').
+// Background isolate entry point — must be a top-level function.
 // ─────────────────────────────────────────────────────────────────────────────
 
 @pragma('vm:entry-point')
-void startCallback() {
-  FlutterForegroundTask.setTaskHandler(_BleTaskHandler());
-}
+void startCallback() => FlutterForegroundTask.setTaskHandler(_BleTaskHandler());
 
 // ─────────────────────────────────────────────────────────────────────────────
-// BleBackgroundService — public API called from the app
+// BleBackgroundService — public API used by the rest of the app.
 // ─────────────────────────────────────────────────────────────────────────────
 
 class BleBackgroundService {
   BleBackgroundService._();
 
-  /// Initialise the foreground task configuration.
-  /// Call once in main() before runApp().
+  /// Call once in main() before runApp() to configure the foreground task.
   static void initialize() {
     FlutterForegroundTask.init(
       androidNotificationOptions: AndroidNotificationOptions(
@@ -39,19 +35,20 @@ class BleBackgroundService {
         priority: NotificationPriority.LOW,
       ),
       iosNotificationOptions: const IOSNotificationOptions(
-        showNotification: false, // iOS CoreBluetooth handles reconnect natively
+        // iOS CoreBluetooth handles reconnection natively — no notification needed.
+        showNotification: false,
       ),
       foregroundTaskOptions: ForegroundTaskOptions(
-        eventAction: ForegroundTaskEventAction.repeat(30000), // every 30 s
-        autoRunOnBoot: true, // restart after device reboot
-        autoRunOnMyPackageReplaced: true, // restart after app update
+        eventAction: ForegroundTaskEventAction.repeat(30000), // tick every 30 s
+        autoRunOnBoot: true,
+        autoRunOnMyPackageReplaced: true,
         allowWakeLock: true,
         allowWifiLock: true,
       ),
     );
   }
 
-  /// Start the foreground service (shows a persistent notification on Android).
+  /// Starts the foreground service (or restarts it if already running).
   static Future<ServiceRequestResult> start() async {
     if (await FlutterForegroundTask.isRunningService) {
       return FlutterForegroundTask.restartService();
@@ -64,19 +61,19 @@ class BleBackgroundService {
     );
   }
 
-  /// Stop the foreground service.
   static Future<ServiceRequestResult> stop() =>
       FlutterForegroundTask.stopService();
 
-  /// Whether the service is currently running.
   static Future<bool> get isRunning => FlutterForegroundTask.isRunningService;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Task handler — runs inside the background isolate
+// _BleTaskHandler — runs inside the background isolate.
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _BleTaskHandler extends TaskHandler {
+  // Tracks devices we are already connected to or are busy connecting to,
+  // so we never fire duplicate connect attempts for the same device.
   final Set<String> _connected = {};
   final Set<String> _connecting = {};
 
@@ -86,7 +83,8 @@ class _BleTaskHandler extends TaskHandler {
     await _startScan();
   }
 
-  /// Called every 30 seconds by ForegroundTaskEventAction.repeat
+  /// Called every 30 s. Stops the service if no devices are paired,
+  /// otherwise re-triggers the scan in case it stopped on its own.
   @override
   Future<void> onRepeatEvent(DateTime timestamp) async {
     final paired = await PairingStorage.loadPairedIds();
@@ -94,7 +92,6 @@ class _BleTaskHandler extends TaskHandler {
       await BleBackgroundService.stop();
       return;
     }
-    // Re-trigger scan in case it stopped
     await _startScan();
   }
 
@@ -103,16 +100,18 @@ class _BleTaskHandler extends TaskHandler {
     debugPrint('[BleTask] destroyed (timeout=$isTimeout)');
   }
 
-  // ── BLE logic ─────────────────────────────────────────────────
+  // ── BLE scan + auto-connect logic ────────────────────────────────────────
 
   Future<void> _startScan() async {
-    try {
-      final paired = await PairingStorage.loadPairedIds();
-      if (paired.isEmpty) return;
+    final paired = await PairingStorage.loadPairedIds();
+    if (paired.isEmpty) return;
 
+    try {
+      // Platform channel vs high-level API:
+      // On mobile/macOS we use the low-level platform channel directly so the
+      // background isolate doesn't fight with the main isolate's plugin state.
       if (Platform.isAndroid || Platform.isIOS || Platform.isMacOS) {
-        final channel = UniversalBlePlatformChannel();
-        await channel.startScan(
+        await UniversalBlePlatformChannel().startScan(
           UniversalScanFilter(
             withServices: [],
             withNamePrefix: [],
@@ -122,93 +121,96 @@ class _BleTaskHandler extends TaskHandler {
       } else {
         await UniversalBle.startScan(scanFilter: ScanFilter(withServices: []));
       }
-
-      UniversalBle.onScanResult = (device) async {
-        if (!paired.contains(device.deviceId)) return;
-        if (_connected.contains(device.deviceId)) return;
-        if (_connecting.contains(device.deviceId)) return;
-
-        _connecting.add(device.deviceId);
-        await _log(
-          device.deviceId,
-          device.name,
-          '[BG] Paired device in range — auto-connecting natively…',
-        );
-
-        // Stabilize Android BLE Stack to mitigate GATT 133 Error
-        await Future.delayed(const Duration(milliseconds: 800));
-
-        // Re-check just in case we successfully connected via another isolate during the delay
-        if (_connected.contains(device.deviceId)) {
-          _connecting.remove(device.deviceId);
-          return;
-        }
-
-        try {
-          await UniversalBle.connect(device.deviceId);
-          _connected.add(device.deviceId);
-          _connecting.remove(device.deviceId);
-
-          await _log(
-            device.deviceId,
-            device.name,
-            '[BG] Auto-connected successfully (background)',
-          );
-
-          // Update background persistent notification
-          FlutterForegroundTask.updateService(
-            notificationTitle: 'BLE Monitor',
-            notificationText: 'Connected: ${device.name ?? device.deviceId}',
-          );
-        } catch (e) {
-          _connecting.remove(device.deviceId);
-          await _log(
-            device.deviceId,
-            device.name,
-            '[BG] Auto-connect failed: $e',
-          );
-        }
-      };
-
-      UniversalBle.onConnectionChange = (deviceId, isConnected, error) async {
-        // Send state change to main isolate so UI updates when device turns off
-        FlutterForegroundTask.sendDataToMain({
-          'type': 'connectionChange',
-          'deviceId': deviceId,
-          'isConnected': isConnected,
-          'error': error,
-        });
-
-        if (!isConnected) {
-          _connected.remove(deviceId);
-          await _log(
-            deviceId,
-            null,
-            '[BG] Device disconnected — waiting to reconnect',
-          );
-          FlutterForegroundTask.updateService(
-            notificationTitle: 'BLE Monitor',
-            notificationText: 'Watching for your paired devices…',
-          );
-
-          // Ensure scanning resumes after a disconnect so it can catch
-          // the device when it comes back into range.
-          await _startScan();
-        }
-      };
     } catch (e) {
-      debugPrint('[BleTask] scan error: $e');
+      debugPrint('[BleTask] scan start error: $e');
+      return;
+    }
+
+    UniversalBle.onScanResult = (device) => _onDeviceFound(device, paired);
+    UniversalBle.onConnectionChange = _onConnectionChanged;
+  }
+
+  /// Triggered for every advertisement packet received during the scan.
+  Future<void> _onDeviceFound(BleDevice device, Set<String> paired) async {
+    final id = device.deviceId;
+
+    // Ignore devices that aren't paired, or that we're already handling.
+    if (!paired.contains(id)) return;
+    if (_connected.contains(id) || _connecting.contains(id)) return;
+
+    _connecting.add(id);
+    await _log(
+      id,
+      device.name,
+      '[BG] Paired device in range — auto-connecting…',
+    );
+
+    // Small delay to stabilise the Android BLE stack (reduces GATT 133 errors).
+    await Future.delayed(const Duration(milliseconds: 800));
+
+    // Another isolate may have connected during the delay — bail out if so.
+    if (_connected.contains(id)) {
+      _connecting.remove(id);
+      return;
+    }
+
+    try {
+      await UniversalBle.connect(id);
+      _connected.add(id);
+      await _log(id, device.name, '[BG] Auto-connected successfully');
+      FlutterForegroundTask.updateService(
+        notificationTitle: 'BLE Monitor',
+        notificationText: 'Connected: ${device.name ?? id}',
+      );
+    } catch (e) {
+      await _log(id, device.name, '[BG] Auto-connect failed: $e');
+    } finally {
+      _connecting.remove(id);
     }
   }
 
+  /// Triggered whenever a device connects or disconnects.
+  Future<void> _onConnectionChanged(
+    String deviceId,
+    bool isConnected,
+    String? error,
+  ) async {
+    // Notify the main isolate so the UI stays in sync.
+    FlutterForegroundTask.sendDataToMain({
+      'type': 'connectionChange',
+      'deviceId': deviceId,
+      'isConnected': isConnected,
+      'error': error,
+    });
+
+    if (isConnected) return;
+
+    _connected.remove(deviceId);
+    await _log(
+      deviceId,
+      null,
+      '[BG] Device disconnected — waiting to reconnect',
+    );
+    FlutterForegroundTask.updateService(
+      notificationTitle: 'BLE Monitor',
+      notificationText: 'Watching for your paired devices…',
+    );
+
+    // Resume scanning so we catch the device when it comes back in range.
+    await _startScan();
+  }
+
+  // ── Logging helper ───────────────────────────────────────────────────────
+
   Future<void> _log(String deviceId, String? deviceName, String message) async {
     try {
-      final entry = BleLogEntry.system(
-        deviceId: deviceId,
-        deviceName: deviceName,
-        message: message,
+      await LogStorage.appendLog(
+        BleLogEntry.system(
+          deviceId: deviceId,
+          deviceName: deviceName,
+          message: message,
+        ),
       );
-      await LogStorage.appendLog(entry);
     } catch (e) {
       debugPrint('[BleTask] log error: $e');
     }

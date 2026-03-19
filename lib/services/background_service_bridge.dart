@@ -1,7 +1,7 @@
 import 'package:bluetooth/services/ble_background_service.dart';
 
-/// Thin wrapper so BluetoothCubit doesn't depend
-/// directly on flutter_foreground_task's API.
+/// Thin wrapper around [BleBackgroundService] so that [BluetoothCubit]
+/// doesn't depend directly on flutter_foreground_task's API.
 class BackgroundServiceBridge {
   BackgroundServiceBridge._();
 

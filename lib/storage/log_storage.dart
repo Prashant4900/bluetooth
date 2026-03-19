@@ -4,54 +4,51 @@ import 'package:bluetooth/models/ble_log_entry.dart';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// Persists BLE log entries per device using SharedPreferences.
+/// Persists BLE log entries per device in SharedPreferences.
 ///
-/// Storage layout:
-///   ble_log_{deviceId}  →  JSON-encoded List of BleLogEntry objects
-///
-/// Retention policy:
-///   • Hard max: 1000 entries per device (oldest pruned first)
-///   • Time max: 24 hours (entries older than this are removed on load)
+/// Storage key:  `ble_log_{deviceId}` → JSON-encoded list of entries
+/// Retention:    Max 1 000 entries per device; entries older than 24 h are
+///               dropped automatically when loading.
 class LogStorage {
+  LogStorage._();
+
   static const _prefix = 'ble_log_';
-  static const _hardMax = 1000;
+  static const _maxEntries = 1000;
   static const _maxAge = Duration(hours: 24);
 
   static String _key(String deviceId) => '$_prefix$deviceId';
 
-  // ── Load ──────────────────────────────────────
+  // ── Read ─────────────────────────────────────────────────────────────────
 
-  /// Load all persisted log entries for [deviceId].
-  /// Entries older than 24 hours are automatically discarded.
+  /// Loads log entries for [deviceId], discarding anything older than 24 h.
   static Future<List<BleLogEntry>> loadLogs(String deviceId) async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final raw = prefs.getStringList(_key(deviceId)) ?? [];
       final cutoff = DateTime.now().subtract(_maxAge);
-      final List<BleLogEntry> logs = [];
-      for (final s in raw) {
-        try {
-          final entry = BleLogEntry.fromJson(
-            jsonDecode(s) as Map<String, dynamic>,
-          );
-          if (entry.timestamp.isAfter(cutoff)) {
-            logs.add(entry);
-          }
-        } catch (_) {
-          // Skip corrupted entries.
-        }
-      }
-      return logs;
+
+      return raw
+          .map((s) {
+            try {
+              return BleLogEntry.fromJson(
+                jsonDecode(s) as Map<String, dynamic>,
+              );
+            } catch (_) {
+              return null; // skip corrupted entries
+            }
+          })
+          .whereType<BleLogEntry>()
+          .where((e) => e.timestamp.isAfter(cutoff))
+          .toList();
     } catch (e) {
       debugPrint('[LogStorage] loadLogs error: $e');
       return [];
     }
   }
 
-  // ── Append ────────────────────────────────────
+  // ── Write ────────────────────────────────────────────────────────────────
 
-  /// Append [entry] to the log for its device.
-  /// Automatically prunes to [_hardMax] entries if exceeded.
+  /// Appends [entry] to its device log, pruning to [_maxEntries] if needed.
   static Future<void> appendLog(BleLogEntry entry) async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -60,22 +57,26 @@ class LogStorage {
 
       raw.add(jsonEncode(entry.toJson()));
 
-      final pruned = raw.length > _hardMax
-          ? raw.sublist(raw.length - _hardMax)
+      // Keep only the most recent entries when the limit is exceeded.
+      final trimmed = raw.length > _maxEntries
+          ? raw.sublist(raw.length - _maxEntries)
           : raw;
 
-      await prefs.setStringList(key, pruned);
+      await prefs.setStringList(key, trimmed);
     } catch (e) {
       debugPrint('[LogStorage] appendLog error: $e');
     }
   }
 
-  // ── Query ─────────────────────────────────────
+  // ── Query ────────────────────────────────────────────────────────────────
 
-  /// Get a list of all device IDs that currently have stored logs.
+  /// Returns device IDs that have at least one stored log entry.
   static Future<List<String>> getDevicesWithLogs() async {
     final prefs = await SharedPreferences.getInstance();
-    final keys = prefs.getKeys().where((k) => k.startsWith(_prefix)).toList();
-    return keys.map((k) => k.replaceFirst(_prefix, '')).toList();
+    return prefs
+        .getKeys()
+        .where((k) => k.startsWith(_prefix))
+        .map((k) => k.replaceFirst(_prefix, ''))
+        .toList();
   }
 }
