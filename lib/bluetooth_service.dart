@@ -18,11 +18,8 @@ class BleConnectionEvent {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // BluetoothService
-// A thin wrapper over universal_ble that exposes
-// each feature group as a clearly separated section.
 // ─────────────────────────────────────────────────────────────────────────────
 class BluetoothService {
-  // Global stream of connection state changes for ALL BLE devices.
   final _connectionEventController =
       StreamController<BleConnectionEvent>.broadcast();
 
@@ -31,32 +28,29 @@ class BluetoothService {
 
   bool _initialized = false;
 
-  // ✅ FIX: Track connected devices and their keepalive characteristics
-  // so we can ping them from the foreground keepalive timer.
+  // Keepalive + dead-device detection state.
   final Map<String, BleCharacteristic?> _connectedDeviceKeepalive = {};
 
-  // ✅ FIX: Foreground keepalive timer. Fires every 15s while the app is
-  // in the foreground. This is separate from the background task tick and
-  // covers the window where the background service hasn't fired yet.
+  // ✅ Track consecutive ping failures per device.
+  // After [_maxConsecutiveFailures] failures we synthesise a disconnect event
+  // rather than waiting for the BLE stack's supervision timeout (which can
+  // take up to 2 minutes on some peripherals).
+  final Map<String, int> _pingFailureCount = {};
+  static const int _maxConsecutiveFailures = 2;
+
   Timer? _keepaliveTimer;
 
   // ══════════════════════════════════════════════
   // SECTION 1 – INITIALIZE
   // ══════════════════════════════════════════════
 
-  /// Stream that broadcasts [AvailabilityState] changes.
   Stream<AvailabilityState> get availabilityStream =>
       UniversalBle.availabilityStream;
 
-  /// Initialise BLE and return the current [AvailabilityState].
-  ///
-  /// Safe to call multiple times – subsequent calls are no-ops
-  /// because universal_ble manages its own native state.
   Future<AvailabilityState> initialize() async {
     if (!_initialized) {
       _initialized = true;
 
-      // Receive connection events forwarded by the background isolate.
       FlutterForegroundTask.addTaskDataCallback((data) {
         if (data is Map && data['type'] == 'connectionChange') {
           final deviceId = data['deviceId'] as String?;
@@ -77,15 +71,13 @@ class BluetoothService {
               ),
             );
 
-            // ✅ FIX: Mirror connection state for the foreground keepalive.
             if (!isConnected) {
-              _connectedDeviceKeepalive.remove(deviceId);
+              _clearDeviceState(deviceId);
             }
           }
         }
       });
 
-      // Fire for ALL connection changes at the platform level.
       UniversalBle.onConnectionChange = (deviceId, isConnected, error) {
         debugPrint(
           '[BLE] Connection change: $deviceId → '
@@ -100,65 +92,100 @@ class BluetoothService {
           ),
         );
 
-        // ✅ FIX: Remove keepalive entry on disconnect so we don't try to
-        // ping a device that's no longer reachable.
         if (!isConnected) {
-          _connectedDeviceKeepalive.remove(deviceId);
+          _clearDeviceState(deviceId);
         }
       };
 
-      // ✅ FIX: Start a periodic foreground keepalive.
-      // 15s is well within the BLE supervision timeout window (typically
-      // 20–100s depending on the peripheral's connection parameters).
+      // ✅ Ping every 8s — frequent enough to detect a dead device well
+      // within the shortest possible supervision timeout (~10s) so the UI
+      // updates promptly when the user switches off their device.
       _keepaliveTimer = Timer.periodic(
-        const Duration(seconds: 15),
+        const Duration(seconds: 8),
         (_) => _pingAllConnected(),
       );
     }
 
-    // Set log level, queue type, and timeout.
     await UniversalBle.setLogLevel(BleLogLevel.verbose);
     UniversalBle.queueType = QueueType.perDevice;
-    UniversalBle.timeout = const Duration(seconds: 10);
+
+    // ✅ Short ATT timeout so a ping to a dead device fails fast (~5s)
+    // rather than hanging for the full BLE supervision window.
+    UniversalBle.timeout = const Duration(seconds: 5);
 
     UniversalBle.onAvailabilityChange = (AvailabilityState state) {
       debugPrint('[BLE] Availability changed → $state');
     };
 
-    final state = await UniversalBle.getBluetoothAvailabilityState();
-    return state;
+    return await UniversalBle.getBluetoothAvailabilityState();
   }
 
-  // ── Foreground GATT keepalive ─────────────────────────────────────────────
+  // ── Foreground GATT keepalive + dead-device detection ────────────────────
 
-  /// Ping all tracked connected devices with a cheap ATT read.
   Future<void> _pingAllConnected() async {
-    for (final entry in List<MapEntry<String, BleCharacteristic?>>.from(
-      _connectedDeviceKeepalive.entries,
-    )) {
-      final deviceId = entry.key;
-      final char = entry.value;
-      if (char == null) continue;
+    for (final deviceId in List<String>.from(_connectedDeviceKeepalive.keys)) {
+      await _pingDevice(deviceId);
+    }
+  }
 
-      try {
-        await char.read();
-        debugPrint('[BLE] Foreground keepalive ping sent to $deviceId');
-      } catch (e) {
-        debugPrint('[BLE] Foreground keepalive ping failed for $deviceId: $e');
-        // The onConnectionChange callback will fire if the device truly dropped.
-        _connectedDeviceKeepalive.remove(deviceId);
+  /// Reads one characteristic from [deviceId].
+  ///
+  /// On success  → resets failure counter (device is alive).
+  /// On failure  → increments failure counter; after [_maxConsecutiveFailures]
+  ///               consecutive failures, synthesises a disconnect event so the
+  ///               UI updates immediately without waiting for the BLE stack.
+  Future<void> _pingDevice(String deviceId) async {
+    final char = _connectedDeviceKeepalive[deviceId];
+    if (char == null) return;
+
+    try {
+      await char.read();
+      // Device responded — reset failure streak.
+      _pingFailureCount[deviceId] = 0;
+      debugPrint('[BLE] Keepalive OK → $deviceId');
+    } catch (e) {
+      final failures = (_pingFailureCount[deviceId] ?? 0) + 1;
+      _pingFailureCount[deviceId] = failures;
+
+      debugPrint(
+        '[BLE] Keepalive FAIL ($failures/$_maxConsecutiveFailures) → $deviceId: $e',
+      );
+
+      if (failures >= _maxConsecutiveFailures) {
+        debugPrint(
+          '[BLE] Device presumed OFF — synthesising disconnect for $deviceId',
+        );
+        _synthesiseDisconnect(deviceId);
       }
     }
+  }
+
+  /// Emits a synthetic disconnect event and cleans up state for [deviceId].
+  /// Called when ping failures exceed the threshold, before the BLE stack
+  /// has fired its own onConnectionChange callback.
+  void _synthesiseDisconnect(String deviceId) {
+    _clearDeviceState(deviceId);
+    _connectionEventController.add(
+      BleConnectionEvent(
+        deviceId: deviceId,
+        isConnected: false,
+        error: 'Device unreachable — presumed powered off',
+      ),
+    );
+  }
+
+  /// Removes all per-device keepalive and failure state.
+  void _clearDeviceState(String deviceId) {
+    _connectedDeviceKeepalive.remove(deviceId);
+    _pingFailureCount.remove(deviceId);
   }
 
   // ══════════════════════════════════════════════
   // SECTION 2 – SCANNING
   // ══════════════════════════════════════════════
 
-  /// Stream of discovered [BleDevice] objects.
   Stream<BleDevice> get scanStream => UniversalBle.scanStream;
 
-  /// Silently stop any active scan. Safe to call even when not scanning.
   Future<void> stopScanIfActive() async {
     try {
       final scanning = await UniversalBle.isScanning();
@@ -169,8 +196,6 @@ class BluetoothService {
     } catch (_) {}
   }
 
-  /// Start scanning. Pass an optional [withServices] list to
-  /// filter results (required on Web).
   Future<void> startScan({List<String> withServices = const []}) async {
     await stopScanIfActive();
     final ScanFilter? filter = withServices.isNotEmpty
@@ -180,69 +205,62 @@ class BluetoothService {
     debugPrint('[BLE] Scan started');
   }
 
-  /// Stop an ongoing scan.
   Future<void> stopScan() async {
     await UniversalBle.stopScan();
     debugPrint('[BLE] Scan stopped');
   }
 
-  /// Whether a scan is currently in progress.
   Future<bool> isScanning() => UniversalBle.isScanning();
 
   // ══════════════════════════════════════════════
   // SECTION 3 – CONNECTION
   // ══════════════════════════════════════════════
 
-  /// Connect to a BLE device.
   Future<void> connect(BleDevice device) async {
     debugPrint('[BLE] Connecting to ${device.name ?? device.deviceId}');
     await device.connect();
     debugPrint('[BLE] Connected');
-    // ✅ FIX: Register for keepalive. Characteristic is resolved lazily on
-    // first ping, or eagerly via registerKeepaliveCharacteristic().
+    // Register for keepalive; char is resolved after service discovery.
     _connectedDeviceKeepalive[device.deviceId] = null;
+    _pingFailureCount[device.deviceId] = 0;
   }
 
-  /// Disconnect from a BLE device.
   Future<void> disconnect(BleDevice device) async {
     debugPrint('[BLE] Disconnecting from ${device.name ?? device.deviceId}');
-    // ✅ FIX: Remove from keepalive map before disconnecting so the timer
-    // doesn't try to ping a device we're intentionally disconnecting.
-    _connectedDeviceKeepalive.remove(device.deviceId);
+    // Remove before disconnecting so the timer doesn't ping a device
+    // we are intentionally closing.
+    _clearDeviceState(device.deviceId);
     await device.disconnect();
     debugPrint('[BLE] Disconnected');
   }
 
-  /// A stream of connection state booleans for [device].
   Stream<bool> connectionStream(BleDevice device) => device.connectionStream;
 
   // ══════════════════════════════════════════════
   // SECTION 4 – SERVICE & CHARACTERISTIC DISCOVERY
   // ══════════════════════════════════════════════
 
-  /// Discover all services advertised by [device].
   Future<List<BleService>> discoverServices(BleDevice device) async {
     final services = await device.discoverServices();
     debugPrint('[BLE] Discovered ${services.length} service(s)');
 
-    // ✅ FIX: After service discovery, eagerly resolve a keepalive
-    // characteristic so the timer can start pinging immediately.
+    // Cache the keepalive char so pings can start immediately.
     final keepaliveChar = await _resolveKeepaliveChar(
       device.deviceId,
       services,
     );
     _connectedDeviceKeepalive[device.deviceId] = keepaliveChar;
+    _pingFailureCount[device.deviceId] = 0;
 
     return services;
   }
 
-  /// Resolve the cheapest readable characteristic for GATT keepalive.
-  /// Priority: Generic Access Device Name (0x2A00) → first readable char.
   Future<BleCharacteristic?> _resolveKeepaliveChar(
     String deviceId,
     List<BleService> services,
   ) async {
     try {
+      // Prefer Generic Access Device Name (0x2A00) — universally readable.
       for (final svc in services) {
         if (svc.uuid.toUpperCase().contains('1800')) {
           for (final ch in svc.characteristics) {
@@ -256,6 +274,7 @@ class BluetoothService {
           }
         }
       }
+      // Fallback: first characteristic with read property.
       for (final svc in services) {
         for (final ch in svc.characteristics) {
           if (ch.properties.contains(CharacteristicProperty.read)) {
@@ -272,11 +291,9 @@ class BluetoothService {
     return null;
   }
 
-  /// Get a specific service by UUID (uses cache by default).
   Future<BleService> getService(BleDevice device, String serviceUuid) =>
       device.getService(serviceUuid);
 
-  /// Get a specific characteristic (uses cache by default).
   Future<BleCharacteristic> getCharacteristic(
     BleDevice device,
     String serviceUuid,
@@ -287,14 +304,12 @@ class BluetoothService {
   // SECTION 5 – READ / WRITE DATA
   // ══════════════════════════════════════════════
 
-  /// Read the current value of [characteristic].
   Future<Uint8List> read(BleCharacteristic characteristic) async {
     final value = await characteristic.read();
     debugPrint('[BLE] Read ${value.length} byte(s)');
     return value;
   }
 
-  /// Write [data] to [characteristic].
   Future<void> write(
     BleCharacteristic characteristic,
     List<int> data, {
@@ -302,8 +317,7 @@ class BluetoothService {
   }) async {
     await characteristic.write(data, withResponse: withResponse);
     debugPrint(
-      '[BLE] Wrote ${data.length} byte(s) '
-      '(withResponse: $withResponse)',
+      '[BLE] Wrote ${data.length} byte(s) (withResponse: $withResponse)',
     );
   }
 
@@ -311,7 +325,6 @@ class BluetoothService {
   // SECTION 6 – SUBSCRIPTIONS (NOTIFY / INDICATE)
   // ══════════════════════════════════════════════
 
-  /// Subscribe to notifications on [characteristic].
   Future<StreamSubscription<Uint8List>> subscribeNotifications(
     BleCharacteristic characteristic,
     void Function(Uint8List value) onData,
@@ -321,7 +334,6 @@ class BluetoothService {
     return characteristic.onValueReceived.listen(onData);
   }
 
-  /// Subscribe to indications on [characteristic].
   Future<StreamSubscription<Uint8List>> subscribeIndications(
     BleCharacteristic characteristic,
     void Function(Uint8List value) onData,
@@ -331,7 +343,6 @@ class BluetoothService {
     return characteristic.onValueReceived.listen(onData);
   }
 
-  /// Unsubscribe from notifications/indications on [characteristic].
   Future<void> unsubscribe(BleCharacteristic characteristic) async {
     await characteristic.unsubscribe();
     debugPrint('[BLE] Unsubscribed');
@@ -341,22 +352,18 @@ class BluetoothService {
   // SECTION 7 – PAIRING
   // ══════════════════════════════════════════════
 
-  /// Trigger pairing.
   Future<void> pair(BleDevice device, {BleCommand? pairingCommand}) async {
     debugPrint('[BLE] Pairing with ${device.name ?? device.deviceId}');
     await device.pair(pairingCommand: pairingCommand);
     debugPrint('[BLE] Pair request sent');
   }
 
-  /// Unpair a device.
   Future<void> unpair(BleDevice device) async {
-    // ✅ FIX: Also remove from keepalive so the timer stops pinging it.
-    _connectedDeviceKeepalive.remove(device.deviceId);
+    _clearDeviceState(device.deviceId);
     await device.unpair();
     debugPrint('[BLE] Unpaired');
   }
 
-  /// Request runtime Bluetooth permissions.
   Future<void> requestPermissions({bool withAndroidFineLocation = false}) =>
       UniversalBle.requestPermissions(
         withAndroidFineLocation: withAndroidFineLocation,
@@ -366,11 +373,11 @@ class BluetoothService {
   // SECTION 8 – DISPOSE
   // ══════════════════════════════════════════════
 
-  /// Cancel the foreground keepalive timer and close the event stream.
-  /// Call this when the service is no longer needed.
   void dispose() {
     _keepaliveTimer?.cancel();
     _keepaliveTimer = null;
+    _connectedDeviceKeepalive.clear();
+    _pingFailureCount.clear();
     _connectionEventController.close();
   }
 }

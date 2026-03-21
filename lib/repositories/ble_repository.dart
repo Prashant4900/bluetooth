@@ -37,7 +37,7 @@ class BleRepository {
 
   BleRepository({required this.logRepository});
 
-  // ── Public state ────────────────────────────────────────────────────────
+  // ── Public state ─────────────────────────────────────────────────────────
 
   Set<String> _pairedDeviceIds = {};
   Set<String> get pairedDeviceIds => Set.unmodifiable(_pairedDeviceIds);
@@ -73,12 +73,20 @@ class BleRepository {
       StreamController<RepoPairingEvent>.broadcast();
   Stream<RepoPairingEvent> get onPairingEvent => _pairingEventController.stream;
 
-  // ── Internal subscriptions ───────────────────────────────────────────────
+  // ── Internal subscriptions & state ───────────────────────────────────────
 
   StreamSubscription<BleConnectionEvent>? _globalConnectionSub;
   StreamSubscription<BleDevice>? _scanSub;
   final Set<String> _connectingDevices = {};
   final Map<String, StreamSubscription<Uint8List>> _notifySubs = {};
+
+  // ✅ FIX: Cache the last-seen BleDevice per deviceId so we can reconnect
+  // even after the device is removed from _discoveredDevices on scan restart.
+  final Map<String, BleDevice> _seenDevices = {};
+
+  // ✅ FIX: Guard against overlapping reconnect attempts triggered by both
+  // the foreground disconnect handler and the background task.
+  final Set<String> _reconnecting = {};
 
   // ── Initialization ───────────────────────────────────────────────────────
 
@@ -99,21 +107,46 @@ class BleRepository {
     _pairedDevicesController.add(Set.unmodifiable(_pairedDeviceIds));
   }
 
-  /// Subscribes to the global BLE connection stream and handles connect/disconnect events.
+  /// Subscribes to the global BLE connection stream and handles
+  /// connect / disconnect events.
   void _listenToConnectionEvents() {
     _globalConnectionSub?.cancel();
     _globalConnectionSub = ble.connectionStateStream.listen((event) async {
-      // Resolve the device name from the discovered list (may not be in the event).
-      final knownName = _discoveredDevices
-          .cast<BleDevice?>()
-          .firstWhere((d) => d?.deviceId == event.deviceId, orElse: () => null)
-          ?.name;
+      // ✅ FIX: Do NOT filter on device name here.
+      //
+      // Previously this code looked up `knownName` from _discoveredDevices
+      // and then checked `knownName?.startsWith('LMNP') != true`, which
+      // silently dropped every event for background-connected devices
+      // (where knownName is null) and every event that arrived before
+      // the device appeared in _discoveredDevices.
+      //
+      // Instead, only filter on whether the device is in our paired set.
+      // The name check is still done, but falls back to _seenDevices so
+      // background connections are handled correctly.
+      if (!_pairedDeviceIds.contains(event.deviceId)) return;
 
-      // Only handle our own devices.
-      if (knownName?.startsWith('LMNP') != true) return;
+      // Resolve the best device name we have, checking multiple caches.
+      final knownName =
+          _connectedDevices[event.deviceId]?.name ??
+          _seenDevices[event.deviceId]?.name ??
+          _discoveredDevices
+              .cast<BleDevice?>()
+              .firstWhere(
+                (d) => d?.deviceId == event.deviceId,
+                orElse: () => null,
+              )
+              ?.name;
 
-      final device = BleDevice(deviceId: event.deviceId, name: knownName);
+      // ✅ FIX: Additional guard — only process LMNP devices, but now using
+      // the enriched name lookup above so null names don't cause false misses.
+      if (knownName != null && !knownName.startsWith('LMNP')) return;
+
+      final device =
+          _seenDevices[event.deviceId] ??
+          BleDevice(deviceId: event.deviceId, name: knownName);
+
       _connectingDevices.remove(event.deviceId);
+      _reconnecting.remove(event.deviceId);
 
       if (event.isConnected) {
         await _handleConnected(device, event.error);
@@ -136,6 +169,11 @@ class BleRepository {
       RepoConnectionEvent(device, RepoConnectionStatus.connected),
     );
 
+    // ✅ FIX: Trigger service discovery on connect so BluetoothService can
+    // resolve and cache the keepalive characteristic immediately. Without
+    // this, the foreground keepalive timer has no char to ping.
+    _discoverServicesForKeepalive(device);
+
     await _log(
       device,
       'Connected to "${device.name ?? device.deviceId}"'
@@ -156,14 +194,124 @@ class BleRepository {
           ? 'Disconnected from "${device.name ?? device.deviceId}" — $error'
           : 'Disconnected from "${device.name ?? device.deviceId}"',
     );
+
+    // ✅ FIX: Attempt foreground reconnect when the app is running.
+    // The background task handles reconnect when the app is not in the
+    // foreground, but when the app IS open we need to do it here.
+    // Only attempt if the device is still in our paired set and we're
+    // not already reconnecting.
+    if (_pairedDeviceIds.contains(device.deviceId) &&
+        !_reconnecting.contains(device.deviceId)) {
+      _scheduleReconnect(device);
+    }
+  }
+
+  /// Schedules a reconnect attempt with a short back-off delay.
+  /// Uses [_reconnecting] as a guard so only one attempt is in flight at a time.
+  void _scheduleReconnect(BleDevice device, {int attemptNumber = 1}) {
+    if (_reconnecting.contains(device.deviceId)) return;
+    if (!_pairedDeviceIds.contains(device.deviceId)) return;
+
+    _reconnecting.add(device.deviceId);
+
+    // Back-off: 1 s → 2 s → 4 s → 8 s → cap at 15 s.
+    final delaySeconds = attemptNumber <= 1
+        ? 1
+        : (1 << (attemptNumber - 1)).clamp(1, 15);
+
+    debugPrint(
+      '[BLE] Scheduling reconnect for ${device.name ?? device.deviceId} '
+      'in ${delaySeconds}s (attempt $attemptNumber)',
+    );
+
+    Future.delayed(Duration(seconds: delaySeconds), () async {
+      // Bail out if the device was unpaired or already reconnected
+      // while we were waiting.
+      if (!_pairedDeviceIds.contains(device.deviceId)) {
+        _reconnecting.remove(device.deviceId);
+        return;
+      }
+      if (_connectedDevices.containsKey(device.deviceId)) {
+        _reconnecting.remove(device.deviceId);
+        return;
+      }
+
+      try {
+        // Check the OS-level connection state first — the background task
+        // may have reconnected already.
+        final state = await UniversalBle.getConnectionState(device.deviceId);
+        if (state == BleConnectionState.connected) {
+          debugPrint(
+            '[BLE] ${device.name ?? device.deviceId} already connected at OS level — syncing',
+          );
+          _reconnecting.remove(device.deviceId);
+          // Sync state without emitting a duplicate connect call.
+          _connectedDevices[device.deviceId] = device;
+          _connectionStateController.add(
+            RepoConnectionEvent(device, RepoConnectionStatus.connected),
+          );
+          _discoverServicesForKeepalive(device);
+          return;
+        }
+      } catch (_) {
+        // getConnectionState unavailable on some platforms — proceed to connect.
+      }
+
+      _reconnecting.remove(device.deviceId);
+      await _log(
+        device,
+        '[FG] Reconnecting to "${device.name ?? device.deviceId}" '
+        '(attempt $attemptNumber)…',
+      );
+      await connect(device);
+
+      // If connect() didn't result in a confirmed connection within a few
+      // seconds, schedule another attempt with increasing back-off.
+      await Future.delayed(const Duration(seconds: 5));
+      if (!_connectedDevices.containsKey(device.deviceId) &&
+          _pairedDeviceIds.contains(device.deviceId) &&
+          !_reconnecting.contains(device.deviceId)) {
+        _scheduleReconnect(device, attemptNumber: attemptNumber + 1);
+      }
+    });
+  }
+
+  // ── Service discovery (keepalive integration) ─────────────────────────────
+
+  /// Discovers services and lets [BluetoothService] cache the keepalive char.
+  /// Called automatically after every successful connection.
+  /// Errors are swallowed — keepalive is best-effort, not critical path.
+  void _discoverServicesForKeepalive(BleDevice device) {
+    // Run fire-and-forget; don't await so we don't block _handleConnected.
+    Future.microtask(() async {
+      try {
+        // ✅ This calls the updated BluetoothService.discoverServices which
+        // now resolves and caches the keepalive characteristic.
+        final services = await ble.discoverServices(device);
+        await _log(
+          device,
+          'Discovered ${services.length} service(s): '
+          '${services.map((s) => s.uuid).join(", ")}',
+        );
+      } catch (e) {
+        debugPrint(
+          '[BLE] Service discovery failed for '
+          '${device.name ?? device.deviceId}: $e',
+        );
+      }
+    });
   }
 
   // ── Scanning ─────────────────────────────────────────────────────────────
 
   Future<void> startScan({List<String> withServices = const []}) async {
-    // Remove non-paired devices from the list so the UI stays tidy.
+    // ✅ FIX: Only remove non-paired AND non-connected devices from the list.
+    // Previously ALL non-paired devices were removed, which could wipe entries
+    // for devices in the middle of a pairing flow.
     _discoveredDevices.removeWhere(
-      (d) => !_pairedDeviceIds.contains(d.deviceId),
+      (d) =>
+          !_pairedDeviceIds.contains(d.deviceId) &&
+          !_connectedDevices.containsKey(d.deviceId),
     );
     isScanning = true;
     _scanStateController.add(null);
@@ -192,7 +340,11 @@ class BleRepository {
   Future<void> _onDeviceDiscovered(BleDevice device) async {
     if (device.name?.startsWith('LMNP') != true) return;
 
-    // Log the device the first time we see it.
+    // ✅ FIX: Always update _seenDevices, even for known devices, so we
+    // have a fresh reference for reconnect attempts.
+    _seenDevices[device.deviceId] = device;
+
+    // Log only the first time we see this device in the current scan session.
     if (!_discoveredDevices.any((d) => d.deviceId == device.deviceId)) {
       _discoveredDevices.add(device);
       _scanStateController.add(null);
@@ -203,17 +355,17 @@ class BleRepository {
       );
     }
 
-    // Auto-connect if this is a paired device we aren't already handling.
     final isPaired = _pairedDeviceIds.contains(device.deviceId);
     final isHandled =
         _connectedDevices.containsKey(device.deviceId) ||
-        _connectingDevices.contains(device.deviceId);
+        _connectingDevices.contains(device.deviceId) ||
+        _reconnecting.contains(
+          device.deviceId,
+        ); // ✅ FIX: also check _reconnecting
 
     if (!isPaired || isHandled) return;
 
-    // Check the real OS-level connection state before sending a connect request.
-    // If the OS already has an active connection (e.g., reconnected in background
-    // before the app opened), sync our state without a redundant connect call.
+    // Check the OS-level connection state before sending a connect request.
     try {
       final state = await UniversalBle.getConnectionState(device.deviceId);
       if (state == BleConnectionState.connected) {
@@ -225,17 +377,18 @@ class BleRepository {
         _connectionStateController.add(
           RepoConnectionEvent(device, RepoConnectionStatus.connected),
         );
+        _discoverServicesForKeepalive(device);
         await _log(
           device,
           'Already connected to "${device.name ?? device.deviceId}" — synced state',
         );
-      } else {
-        connect(device, delay: const Duration(milliseconds: 800));
+        return;
       }
     } catch (_) {
-      // If we can't determine state, fall back to a normal connect.
-      connect(device, delay: const Duration(milliseconds: 800));
+      // Platform doesn't support getConnectionState — fall through to connect.
     }
+
+    connect(device, delay: const Duration(milliseconds: 800));
   }
 
   // ── Connection ───────────────────────────────────────────────────────────
@@ -252,7 +405,6 @@ class BleRepository {
 
     if (delay > Duration.zero) {
       await Future.delayed(delay);
-      // Bail out if another path connected us during the delay.
       if (_connectedDevices.containsKey(device.deviceId)) {
         _connectingDevices.remove(device.deviceId);
         return;
@@ -276,11 +428,23 @@ class BleRepository {
 
   Future<void> disconnect(BleDevice device) async {
     if (!_connectedDevices.containsKey(device.deviceId)) return;
+
+    // ✅ FIX: Clear reconnect guard so an intentional disconnect doesn't
+    // trigger an automatic reconnect attempt.
+    _reconnecting.add(device.deviceId);
+
     try {
       await ble.disconnect(device);
-      // _listenToConnectionEvents handles the confirmation and logging.
+      // _listenToConnectionEvents handles confirmation.
     } catch (e) {
+      _reconnecting.remove(device.deviceId);
       _errorController.add(e.toString());
+    } finally {
+      // Remove the guard after a short delay so _handleDisconnected fires
+      // first and sees the guard, then we release it.
+      Future.delayed(const Duration(seconds: 2), () {
+        _reconnecting.remove(device.deviceId);
+      });
     }
   }
 
@@ -288,10 +452,12 @@ class BleRepository {
 
   Future<void> discoverServices(BleDevice device) async {
     try {
+      // ✅ Delegates to BluetoothService which now caches the keepalive char.
       final services = await ble.discoverServices(device);
       await _log(
         device,
-        'Discovered ${services.length} service(s): ${services.map((s) => s.uuid).join(", ")}',
+        'Discovered ${services.length} service(s): '
+        '${services.map((s) => s.uuid).join(", ")}',
       );
     } catch (e) {
       _errorController.add(e.toString());
@@ -326,7 +492,8 @@ class BleRepository {
         await _logRaw(
           deviceId,
           deviceName,
-          'Write${withResponse ? " (with response)" : " (no response)"} to ${characteristic.uuid}',
+          'Write${withResponse ? " (with response)" : " (no response)"} '
+          'to ${characteristic.uuid}',
         );
       }
     } catch (e) {
@@ -356,7 +523,8 @@ class BleRepository {
         await _logRaw(
           deviceId,
           deviceName,
-          'Subscribed to ${useIndications ? "indications" : "notifications"} on ${characteristic.uuid}',
+          'Subscribed to ${useIndications ? "indications" : "notifications"} '
+          'on ${characteristic.uuid}',
         );
       }
     } catch (e) {
@@ -412,13 +580,16 @@ class BleRepository {
     );
 
     try {
-      // Disconnect first so the GATT connection is torn down at the OS level.
-      // Without this, the physical device can't auto-power off after unpairing.
+      // ✅ FIX: Set the reconnect guard BEFORE disconnecting so that
+      // _handleDisconnected doesn't schedule a reconnect during unpairing.
+      _reconnecting.add(device.deviceId);
+
       if (_connectedDevices.containsKey(device.deviceId)) {
         await ble.disconnect(device);
         _connectedDevices.remove(device.deviceId);
         debugPrint(
-          '[BLE] Disconnected before unpairing ${device.name ?? device.deviceId}',
+          '[BLE] Disconnected before unpairing '
+          '${device.name ?? device.deviceId}',
         );
       }
 
@@ -427,6 +598,10 @@ class BleRepository {
       _pairedDeviceIds = await PairingStorage.loadPairedIds();
       await _log(device, 'Unpaired & removed from storage');
 
+      // ✅ FIX: Clean up all tracking state for this device.
+      _seenDevices.remove(device.deviceId);
+      _reconnecting.remove(device.deviceId);
+
       if (_pairedDeviceIds.isEmpty) await BackgroundServiceBridge.stop();
 
       _pairedDevicesController.add(Set.unmodifiable(_pairedDeviceIds));
@@ -434,6 +609,7 @@ class BleRepository {
         RepoPairingEvent(device.deviceId, false, isPaired: false),
       );
     } catch (e) {
+      _reconnecting.remove(device.deviceId);
       await _log(device, 'Unpair failed: $e');
       _errorController.add(e.toString());
     }
@@ -450,11 +626,11 @@ class BleRepository {
     _connectionStateController.close();
     _errorController.close();
     _pairingEventController.close();
+    ble.dispose(); // ✅ FIX: Cancel the foreground keepalive timer.
   }
 
   // ── Logging helpers ──────────────────────────────────────────────────────
 
-  /// Logs a message attributed to a [BleDevice].
   Future<void> _log(BleDevice device, String message) => logRepository.addLog(
     BleLogEntry.system(
       deviceId: device.deviceId,
@@ -463,7 +639,6 @@ class BleRepository {
     ),
   );
 
-  /// Logs a message when only raw IDs are available (e.g. read/write/subscribe).
   Future<void> _logRaw(String deviceId, String? deviceName, String message) =>
       logRepository.addLog(
         BleLogEntry.system(
