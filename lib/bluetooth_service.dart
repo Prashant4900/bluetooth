@@ -28,17 +28,31 @@ class BluetoothService {
 
   bool _initialized = false;
 
-  // Keepalive + dead-device detection state.
-  final Map<String, BleCharacteristic?> _connectedDeviceKeepalive = {};
+  // ── Per-device keepalive state ───────────────────────────────────────────
 
-  // ✅ Track consecutive ping failures per device.
-  // After [_maxConsecutiveFailures] failures we synthesise a disconnect event
-  // rather than waiting for the BLE stack's supervision timeout (which can
-  // take up to 2 minutes on some peripherals).
+  // Best readable characteristic for dead-device detection pings.
+  final Map<String, BleCharacteristic?> _readChar = {};
+
+  // Best writable characteristic for firmware inactivity-reset pings.
+  // This is what actually resets the vendor's 3-minute auto-off timer.
+  final Map<String, BleCharacteristic?> _writeChar = {};
+
+  // Consecutive read-ping failures — used to synthesise a disconnect event
+  // before the BLE stack's own supervision timeout fires.
   final Map<String, int> _pingFailureCount = {};
   static const int _maxConsecutiveFailures = 2;
 
-  Timer? _keepaliveTimer;
+  // Timer 1 — fires every 8 s.
+  // Reads a characteristic to (a) keep the BLE link alive at the radio level
+  // and (b) detect a powered-off device quickly via failure counting.
+  Timer? _connectionCheckTimer;
+
+  // Timer 2 — fires every 2 min.
+  // Writes a dummy byte to the best writable characteristic so the firmware's
+  // application-layer inactivity timer is reset before the 3-min threshold.
+  // Once the vendor supplies the real heartbeat UUID this timer keeps working —
+  // just swap _writeChar resolution to prefer that UUID.
+  Timer? _firmwareKeepAliveTimer;
 
   // ══════════════════════════════════════════════
   // SECTION 1 – INITIALIZE
@@ -51,15 +65,15 @@ class BluetoothService {
     if (!_initialized) {
       _initialized = true;
 
+      // Forward background-isolate connection events into our stream.
       FlutterForegroundTask.addTaskDataCallback((data) {
         if (data is Map && data['type'] == 'connectionChange') {
           final deviceId = data['deviceId'] as String?;
           final isConnected = data['isConnected'] as bool?;
           final error = data['error'] as String?;
-
           if (deviceId != null && isConnected != null) {
             debugPrint(
-              '[BLE-BG-SYNC] Connection change: $deviceId → '
+              '[BLE-BG-SYNC] $deviceId → '
               '${isConnected ? "connected" : "disconnected"}'
               '${error != null ? " ($error)" : ""}',
             );
@@ -70,17 +84,15 @@ class BluetoothService {
                 error: error,
               ),
             );
-
-            if (!isConnected) {
-              _clearDeviceState(deviceId);
-            }
+            if (!isConnected) _clearDeviceState(deviceId);
           }
         }
       });
 
+      // Forward platform-level connection events.
       UniversalBle.onConnectionChange = (deviceId, isConnected, error) {
         debugPrint(
-          '[BLE] Connection change: $deviceId → '
+          '[BLE] $deviceId → '
           '${isConnected ? "connected" : "disconnected"}'
           '${error != null ? " ($error)" : ""}',
         );
@@ -91,78 +103,97 @@ class BluetoothService {
             error: error,
           ),
         );
-
-        if (!isConnected) {
-          _clearDeviceState(deviceId);
-        }
+        if (!isConnected) _clearDeviceState(deviceId);
       };
 
-      // ✅ Ping every 8s — frequent enough to detect a dead device well
-      // within the shortest possible supervision timeout (~10s) so the UI
-      // updates promptly when the user switches off their device.
-      _keepaliveTimer = Timer.periodic(
+      // ── Timer 1: connection-check ping every 8 s ─────────────────────────
+      // Reads a characteristic. Fast failure (5 s ATT timeout × 2 failures)
+      // means we detect a powered-off device within ~18 s instead of waiting
+      // for the BLE supervision timeout (up to 2 min).
+      _connectionCheckTimer = Timer.periodic(
         const Duration(seconds: 8),
-        (_) => _pingAllConnected(),
+        (_) => _connectionCheckPing(),
+      );
+
+      // ── Timer 2: firmware keepalive write every 2 min ────────────────────
+      // Writes a dummy byte to the device's application layer.
+      // This is the only traffic the firmware's inactivity timer cares about.
+      // 2 min < 3 min firmware threshold → timer resets before auto-off fires.
+      _firmwareKeepAliveTimer = Timer.periodic(
+        const Duration(minutes: 2),
+        (_) => _firmwareKeepAlivePing(),
       );
     }
 
     await UniversalBle.setLogLevel(BleLogLevel.verbose);
     UniversalBle.queueType = QueueType.perDevice;
 
-    // ✅ Short ATT timeout so a ping to a dead device fails fast (~5s)
-    // rather than hanging for the full BLE supervision window.
+    // 5 s ATT timeout — dead device read fails fast rather than hanging.
     UniversalBle.timeout = const Duration(seconds: 5);
 
-    UniversalBle.onAvailabilityChange = (AvailabilityState state) {
-      debugPrint('[BLE] Availability changed → $state');
-    };
+    UniversalBle.onAvailabilityChange = (state) =>
+        debugPrint('[BLE] Availability → $state');
 
     return await UniversalBle.getBluetoothAvailabilityState();
   }
 
-  // ── Foreground GATT keepalive + dead-device detection ────────────────────
+  // ── Timer 1: connection-check read ping ──────────────────────────────────
 
-  Future<void> _pingAllConnected() async {
-    for (final deviceId in List<String>.from(_connectedDeviceKeepalive.keys)) {
-      await _pingDevice(deviceId);
-    }
-  }
+  Future<void> _connectionCheckPing() async {
+    for (final deviceId in List<String>.from(_readChar.keys)) {
+      final char = _readChar[deviceId];
+      if (char == null) continue;
 
-  /// Reads one characteristic from [deviceId].
-  ///
-  /// On success  → resets failure counter (device is alive).
-  /// On failure  → increments failure counter; after [_maxConsecutiveFailures]
-  ///               consecutive failures, synthesises a disconnect event so the
-  ///               UI updates immediately without waiting for the BLE stack.
-  Future<void> _pingDevice(String deviceId) async {
-    final char = _connectedDeviceKeepalive[deviceId];
-    if (char == null) return;
-
-    try {
-      await char.read();
-      // Device responded — reset failure streak.
-      _pingFailureCount[deviceId] = 0;
-      debugPrint('[BLE] Keepalive OK → $deviceId');
-    } catch (e) {
-      final failures = (_pingFailureCount[deviceId] ?? 0) + 1;
-      _pingFailureCount[deviceId] = failures;
-
-      debugPrint(
-        '[BLE] Keepalive FAIL ($failures/$_maxConsecutiveFailures) → $deviceId: $e',
-      );
-
-      if (failures >= _maxConsecutiveFailures) {
+      try {
+        await char.read();
+        _pingFailureCount[deviceId] = 0;
+        debugPrint('[BLE] Connection-check OK → $deviceId');
+      } catch (e) {
+        final failures = (_pingFailureCount[deviceId] ?? 0) + 1;
+        _pingFailureCount[deviceId] = failures;
         debugPrint(
-          '[BLE] Device presumed OFF — synthesising disconnect for $deviceId',
+          '[BLE] Connection-check FAIL ($failures/$_maxConsecutiveFailures)'
+          ' → $deviceId: $e',
         );
-        _synthesiseDisconnect(deviceId);
+        if (failures >= _maxConsecutiveFailures) {
+          debugPrint('[BLE] Presumed OFF → synthesising disconnect: $deviceId');
+          _synthesiseDisconnect(deviceId);
+        }
       }
     }
   }
 
-  /// Emits a synthetic disconnect event and cleans up state for [deviceId].
-  /// Called when ping failures exceed the threshold, before the BLE stack
-  /// has fired its own onConnectionChange callback.
+  // ── Timer 2: firmware inactivity-reset write ping ────────────────────────
+
+  Future<void> _firmwareKeepAlivePing() async {
+    for (final deviceId in List<String>.from(_writeChar.keys)) {
+      final char = _writeChar[deviceId];
+      if (char == null) continue;
+
+      try {
+        // Write a single 0x00 byte with no response required.
+        // The content doesn't matter — any write reaching the application
+        // processor resets the firmware's inactivity counter.
+        // withResponse: false avoids an extra round-trip and is less
+        // likely to be rejected by an unknown characteristic.
+        await char.write([0x00], withResponse: false);
+        debugPrint('[BLE] Firmware keepalive write OK → $deviceId');
+      } catch (e) {
+        // Write failed — try with response as fallback.
+        try {
+          await char.write([0x00], withResponse: true);
+          debugPrint(
+            '[BLE] Firmware keepalive write OK (with response) → $deviceId',
+          );
+        } catch (e2) {
+          debugPrint('[BLE] Firmware keepalive write FAILED → $deviceId: $e2');
+          // Connection-check timer will handle disconnect detection;
+          // don't duplicate logic here.
+        }
+      }
+    }
+  }
+
   void _synthesiseDisconnect(String deviceId) {
     _clearDeviceState(deviceId);
     _connectionEventController.add(
@@ -174,9 +205,9 @@ class BluetoothService {
     );
   }
 
-  /// Removes all per-device keepalive and failure state.
   void _clearDeviceState(String deviceId) {
-    _connectedDeviceKeepalive.remove(deviceId);
+    _readChar.remove(deviceId);
+    _writeChar.remove(deviceId);
     _pingFailureCount.remove(deviceId);
   }
 
@@ -188,17 +219,16 @@ class BluetoothService {
 
   Future<void> stopScanIfActive() async {
     try {
-      final scanning = await UniversalBle.isScanning();
-      if (scanning) {
+      if (await UniversalBle.isScanning()) {
         await UniversalBle.stopScan();
-        debugPrint('[BLE] Stopped residual scan before starting new one');
+        debugPrint('[BLE] Stopped residual scan');
       }
     } catch (_) {}
   }
 
   Future<void> startScan({List<String> withServices = const []}) async {
     await stopScanIfActive();
-    final ScanFilter? filter = withServices.isNotEmpty
+    final filter = withServices.isNotEmpty
         ? ScanFilter(withServices: withServices)
         : null;
     await UniversalBle.startScan(scanFilter: filter);
@@ -219,16 +249,15 @@ class BluetoothService {
   Future<void> connect(BleDevice device) async {
     debugPrint('[BLE] Connecting to ${device.name ?? device.deviceId}');
     await device.connect();
-    debugPrint('[BLE] Connected');
-    // Register for keepalive; char is resolved after service discovery.
-    _connectedDeviceKeepalive[device.deviceId] = null;
+    // Slots are registered; chars resolved after discoverServices().
+    _readChar[device.deviceId] = null;
+    _writeChar[device.deviceId] = null;
     _pingFailureCount[device.deviceId] = 0;
+    debugPrint('[BLE] Connected');
   }
 
   Future<void> disconnect(BleDevice device) async {
     debugPrint('[BLE] Disconnecting from ${device.name ?? device.deviceId}');
-    // Remove before disconnecting so the timer doesn't ping a device
-    // we are intentionally closing.
     _clearDeviceState(device.deviceId);
     await device.disconnect();
     debugPrint('[BLE] Disconnected');
@@ -244,50 +273,115 @@ class BluetoothService {
     final services = await device.discoverServices();
     debugPrint('[BLE] Discovered ${services.length} service(s)');
 
-    // Cache the keepalive char so pings can start immediately.
-    final keepaliveChar = await _resolveKeepaliveChar(
-      device.deviceId,
-      services,
-    );
-    _connectedDeviceKeepalive[device.deviceId] = keepaliveChar;
+    // Resolve both chars and cache them for the two timers.
+    _readChar[device.deviceId] = _resolveReadChar(device.deviceId, services);
+    _writeChar[device.deviceId] = _resolveWriteChar(device.deviceId, services);
     _pingFailureCount[device.deviceId] = 0;
+
+    debugPrint(
+      '[BLE] Keepalive chars resolved for ${device.deviceId} — '
+      'read: ${_readChar[device.deviceId]?.uuid ?? "none"}, '
+      'write: ${_writeChar[device.deviceId]?.uuid ?? "none"}',
+    );
 
     return services;
   }
 
-  Future<BleCharacteristic?> _resolveKeepaliveChar(
+  /// Finds the best characteristic for read-based dead-device detection.
+  ///
+  /// Priority:
+  ///   1. Non-GAP/GATT service readable char  ← reaches application processor
+  ///   2. Generic Access 0x2A00               ← controller-level fallback
+  BleCharacteristic? _resolveReadChar(
     String deviceId,
     List<BleService> services,
-  ) async {
-    try {
-      // Prefer Generic Access Device Name (0x2A00) — universally readable.
-      for (final svc in services) {
-        if (svc.uuid.toUpperCase().contains('1800')) {
-          for (final ch in svc.characteristics) {
-            if (ch.uuid.toUpperCase().contains('2A00') &&
-                ch.properties.contains(CharacteristicProperty.read)) {
-              debugPrint(
-                '[BLE] Keepalive char resolved (0x2A00) for $deviceId',
-              );
-              return ch;
-            }
-          }
+  ) {
+    // Skip standard GAP (0x1800) and GATT (0x1801) services — those are
+    // answered by the BLE controller chip, not the firmware.
+    final appServices = services.where(
+      (s) =>
+          !s.uuid.toUpperCase().contains('1800') &&
+          !s.uuid.toUpperCase().contains('1801'),
+    );
+
+    for (final svc in appServices) {
+      for (final ch in svc.characteristics) {
+        if (ch.properties.contains(CharacteristicProperty.read)) {
+          debugPrint('[BLE] Read char (app layer): ${ch.uuid}');
+          return ch;
         }
       }
-      // Fallback: first characteristic with read property.
-      for (final svc in services) {
-        for (final ch in svc.characteristics) {
-          if (ch.properties.contains(CharacteristicProperty.read)) {
-            debugPrint(
-              '[BLE] Keepalive char resolved (fallback) for $deviceId',
-            );
-            return ch;
-          }
-        }
-      }
-    } catch (e) {
-      debugPrint('[BLE] Could not resolve keepalive char for $deviceId: $e');
     }
+
+    // Fallback to GAP Device Name if no application char found.
+    for (final svc in services) {
+      for (final ch in svc.characteristics) {
+        if (ch.properties.contains(CharacteristicProperty.read)) {
+          debugPrint('[BLE] Read char (GAP fallback): ${ch.uuid}');
+          return ch;
+        }
+      }
+    }
+
+    debugPrint('[BLE] No readable char found for $deviceId');
+    return null;
+  }
+
+  /// Finds the best characteristic for write-based firmware keepalive.
+  ///
+  /// Priority:
+  ///   1. Non-GAP/GATT writable-without-response char  ← fastest, no ACK needed
+  ///   2. Non-GAP/GATT writable-with-response char
+  ///   3. Any writable char (including GAP) as last resort
+  BleCharacteristic? _resolveWriteChar(
+    String deviceId,
+    List<BleService> services,
+  ) {
+    final appServices = services.where(
+      (s) =>
+          !s.uuid.toUpperCase().contains('1800') &&
+          !s.uuid.toUpperCase().contains('1801'),
+    );
+
+    // Pass 1: write-without-response on application services.
+    for (final svc in appServices) {
+      for (final ch in svc.characteristics) {
+        if (ch.properties.contains(
+          CharacteristicProperty.writeWithoutResponse,
+        )) {
+          debugPrint('[BLE] Write char (app, no-response): ${ch.uuid}');
+          return ch;
+        }
+      }
+    }
+
+    // Pass 2: write-with-response on application services.
+    for (final svc in appServices) {
+      for (final ch in svc.characteristics) {
+        if (ch.properties.contains(CharacteristicProperty.write)) {
+          debugPrint('[BLE] Write char (app, with-response): ${ch.uuid}');
+          return ch;
+        }
+      }
+    }
+
+    // Pass 3: any writable char anywhere.
+    for (final svc in services) {
+      for (final ch in svc.characteristics) {
+        if (ch.properties.contains(
+              CharacteristicProperty.writeWithoutResponse,
+            ) ||
+            ch.properties.contains(CharacteristicProperty.write)) {
+          debugPrint('[BLE] Write char (fallback): ${ch.uuid}');
+          return ch;
+        }
+      }
+    }
+
+    debugPrint(
+      '[BLE] No writable char found for $deviceId — '
+      'firmware keepalive will be inactive until vendor UUID is provided',
+    );
     return null;
   }
 
@@ -374,9 +468,12 @@ class BluetoothService {
   // ══════════════════════════════════════════════
 
   void dispose() {
-    _keepaliveTimer?.cancel();
-    _keepaliveTimer = null;
-    _connectedDeviceKeepalive.clear();
+    _connectionCheckTimer?.cancel();
+    _firmwareKeepAliveTimer?.cancel();
+    _connectionCheckTimer = null;
+    _firmwareKeepAliveTimer = null;
+    _readChar.clear();
+    _writeChar.clear();
     _pingFailureCount.clear();
     _connectionEventController.close();
   }
